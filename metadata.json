@@ -1,0 +1,6 @@
+{
+  "name": "AUME LowPoly Fabrication",
+  "description": "منظومة AUME المتكاملة لتحويل وتصنيع نماذج LowPoly ثلاثية الأبعاد — معمارية Geometry Core V2، الفرد التصنيعي Incremental Unfold، وتوزيع الألواح Nesting، واستخراج DXF وBOM",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
