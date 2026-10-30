@@ -27,17 +27,23 @@ import {
   ManufacturingSettings,
   CNCSettings,
   ToolpathPlan,
+  DEFAULT_CNC_SETTINGS,
+  DEFAULT_MANUFACTURING_SETTINGS,
 } from '../core/manufacturing/types';
+import { GeometryReconstructionResult } from '../core/geometry/types';
 import { buildKinematicSimulation } from '../core/manufacturing/kinematics';
 import { generateToolpathPlan } from '../core/manufacturing/toolpath';
 
 interface KinematicsViewportProps {
   panels: SmartPanel[];
   unfold: UnfoldResult | null;
-  assembly: AssemblyMap | null;
+  assembly?: AssemblyMap | null;
+  reconstruction?: GeometryReconstructionResult | null;
   nesting: NestingResult | null;
-  mfgSettings: ManufacturingSettings;
-  cncSettings: CNCSettings;
+  settings?: ManufacturingSettings;
+  mfgSettings?: ManufacturingSettings;
+  cncSettings?: CNCSettings;
+  onOpenGCode?: () => void;
   onOpenGCodeModal?: () => void;
 }
 
@@ -45,11 +51,18 @@ export const KinematicsViewport: React.FC<KinematicsViewportProps> = ({
   panels,
   unfold,
   assembly,
+  reconstruction,
   nesting,
+  settings,
   mfgSettings,
   cncSettings,
+  onOpenGCode,
   onOpenGCodeModal,
 }) => {
+  const effectiveSettings = settings || mfgSettings || DEFAULT_MANUFACTURING_SETTINGS;
+  const effectiveCncSettings = cncSettings || DEFAULT_CNC_SETTINGS;
+  const handleOpenGCode = onOpenGCode || onOpenGCodeModal;
+
   const containerRef = useRef<HTMLDivElement>(null);
   const [viewMode, setViewMode] = useState<'folding' | 'toolpath'>('folding');
   const [progress, setProgress] = useState<number>(0);
@@ -62,16 +75,18 @@ export const KinematicsViewport: React.FC<KinematicsViewportProps> = ({
 
   useEffect(() => {
     if (nesting && nesting.sheets.length > 0) {
-      const plan = generateToolpathPlan(nesting.sheets, mfgSettings, cncSettings);
+      const plan = generateToolpathPlan(nesting.sheets, effectiveSettings, effectiveCncSettings);
       setToolpathPlan(plan);
     }
-  }, [nesting, mfgSettings, cncSettings]);
+  }, [nesting, effectiveSettings, effectiveCncSettings]);
 
   // Kinematic simulation object
   const simulation = React.useMemo(() => {
-    if (!unfold || !assembly || panels.length === 0) return null;
-    return buildKinematicSimulation(panels, unfold, assembly);
-  }, [panels, unfold, assembly]);
+    if (!unfold || panels.length === 0) return null;
+    const context = assembly || reconstruction;
+    if (!context) return null;
+    return buildKinematicSimulation(panels, unfold, context);
+  }, [panels, unfold, assembly, reconstruction]);
 
   // Three.js scene refs
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -408,10 +423,10 @@ export const KinematicsViewport: React.FC<KinematicsViewportProps> = ({
 
         {/* Action Controls & G-Code trigger */}
         <div className="flex items-center gap-3">
-          {onOpenGCodeModal && (
+          {handleOpenGCode && (
             <button
-              onClick={onOpenGCodeModal}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-medium transition-colors border border-slate-700"
+              onClick={handleOpenGCode}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-medium transition-colors border border-slate-700 cursor-pointer"
             >
               <Zap className="w-3.5 h-3.5 text-amber-400" />
               <span>معاينة وتصدير كود G-Code</span>

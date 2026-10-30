@@ -386,3 +386,136 @@ export function createTry1BenchmarkFixture(targetTriangles: number = 2000): Mesh
     name: `try1.stl Benchmark (${faces.length} Triangles across 6 Major Faces)`,
   };
 }
+
+/**
+ * LowPoly Camel Sculpture Fixture (AUME Standard Benchmark)
+ * Matches the AUME lowpoly camel fabrication architecture:
+ * Anatomical sectors: Head & Neck, Hump (Single piece), Torso/Belly (Left/Right),
+ * 4 Legs (Internal/External halves), Tail, plus minimal detached weld patches.
+ */
+export function createLowPolyCamelFixture(scale: number = 2.0): MeshInput {
+  const vertices: Vertex[] = [
+    // Head & Snout (v0 - v5)
+    { id: 0, position: [80 * scale, 0, 110 * scale] },
+    { id: 1, position: [70 * scale, 15 * scale, 118 * scale] },
+    { id: 2, position: [70 * scale, -15 * scale, 118 * scale] },
+    { id: 3, position: [65 * scale, 12 * scale, 98 * scale] },
+    { id: 4, position: [65 * scale, -12 * scale, 98 * scale] },
+    { id: 5, position: [50 * scale, 0, 125 * scale] },
+
+    // Neck (v6 - v11)
+    { id: 6, position: [45 * scale, 14 * scale, 105 * scale] },
+    { id: 7, position: [45 * scale, -14 * scale, 105 * scale] },
+    { id: 8, position: [40 * scale, 12 * scale, 75 * scale] },
+    { id: 9, position: [40 * scale, -12 * scale, 75 * scale] },
+    { id: 10, position: [30 * scale, 16 * scale, 50 * scale] },
+    { id: 11, position: [30 * scale, -16 * scale, 50 * scale] },
+
+    // Torso Front / Shoulders (v12 - v15)
+    { id: 12, position: [20 * scale, 25 * scale, 65 * scale] },
+    { id: 13, position: [20 * scale, -25 * scale, 65 * scale] },
+    { id: 14, position: [20 * scale, 18 * scale, 25 * scale] },
+    { id: 15, position: [20 * scale, -18 * scale, 25 * scale] },
+
+    // Hump (v16 - v20)
+    { id: 16, position: [5 * scale, 0, 95 * scale] },
+    { id: 17, position: [-15 * scale, 0, 102 * scale] },
+    { id: 18, position: [-35 * scale, 0, 92 * scale] },
+    { id: 19, position: [-10 * scale, 26 * scale, 70 * scale] },
+    { id: 20, position: [-10 * scale, -26 * scale, 70 * scale] },
+
+    // Belly & Mid Torso (v21 - v24)
+    { id: 21, position: [-10 * scale, 22 * scale, 22 * scale] },
+    { id: 22, position: [-10 * scale, -22 * scale, 22 * scale] },
+    { id: 23, position: [-35 * scale, 25 * scale, 62 * scale] },
+    { id: 24, position: [-35 * scale, -25 * scale, 62 * scale] },
+
+    // Rear / Pelvis (v25 - v28)
+    { id: 25, position: [-55 * scale, 0, 72 * scale] },
+    { id: 26, position: [-50 * scale, 24 * scale, 58 * scale] },
+    { id: 27, position: [-50 * scale, -24 * scale, 58 * scale] },
+    { id: 28, position: [-45 * scale, 0, 25 * scale] },
+
+    // Tail (v29 - v31)
+    { id: 29, position: [-65 * scale, 0, 60 * scale] },
+    { id: 30, position: [-75 * scale, 4 * scale, 45 * scale] },
+    { id: 31, position: [-75 * scale, -4 * scale, 45 * scale] },
+
+    // Front Right Leg (v32 - v35)
+    { id: 32, position: [18 * scale, 20 * scale, 0 * scale] },
+    { id: 33, position: [15 * scale, 18 * scale, -45 * scale] },
+    { id: 34, position: [25 * scale, 22 * scale, -45 * scale] },
+    { id: 35, position: [18 * scale, 12 * scale, -10 * scale] },
+
+    // Front Left Leg (v36 - v39)
+    { id: 36, position: [18 * scale, -20 * scale, 0 * scale] },
+    { id: 37, position: [15 * scale, -18 * scale, -45 * scale] },
+    { id: 38, position: [25 * scale, -22 * scale, -45 * scale] },
+    { id: 39, position: [18 * scale, -12 * scale, -10 * scale] },
+
+    // Back Right Leg (v40 - v43)
+    { id: 40, position: [-48 * scale, 22 * scale, 10 * scale] },
+    { id: 41, position: [-45 * scale, 18 * scale, -45 * scale] },
+    { id: 42, position: [-38 * scale, 20 * scale, -45 * scale] },
+    { id: 43, position: [-46 * scale, 12 * scale, -5 * scale] },
+
+    // Back Left Leg (v44 - v47)
+    { id: 44, position: [-48 * scale, -22 * scale, 10 * scale] },
+    { id: 45, position: [-45 * scale, -18 * scale, -45 * scale] },
+    { id: 46, position: [-38 * scale, -20 * scale, -45 * scale] },
+    { id: 47, position: [-46 * scale, -12 * scale, -5 * scale] },
+  ];
+
+  const rawTriangles: [number, number, number][] = [
+    // Snout & Head
+    [0, 1, 2], [0, 2, 4], [0, 4, 3], [0, 3, 1],
+    [1, 5, 2], [1, 3, 6], [2, 7, 4], [1, 6, 5], [2, 5, 7],
+
+    // Neck
+    [5, 6, 7], [6, 8, 7], [7, 8, 9], [6, 12, 8], [7, 9, 13],
+    [8, 10, 9], [9, 10, 11], [8, 12, 10], [9, 11, 13],
+    [10, 14, 11], [11, 14, 15],
+
+    // Front Chest & Shoulders
+    [12, 16, 10], [13, 11, 16], [12, 19, 16], [13, 16, 20],
+    [12, 14, 19], [13, 20, 15], [14, 21, 19], [15, 20, 22],
+    [14, 22, 21],
+
+    // Hump (Single continuous arched feature)
+    [16, 17, 19], [16, 20, 17], [17, 18, 19], [17, 20, 18],
+    [18, 23, 19], [18, 20, 24],
+
+    // Flanks & Belly
+    [19, 21, 23], [20, 24, 22], [21, 28, 23], [22, 24, 28],
+    [21, 22, 28],
+
+    // Rear / Pelvis & Rump
+    [18, 25, 23], [18, 24, 25], [23, 25, 26], [24, 27, 25],
+    [23, 26, 28], [24, 28, 27], [26, 29, 28], [27, 28, 29],
+    [25, 29, 26], [25, 27, 29],
+
+    // Tail
+    [29, 30, 31], [29, 31, 28], [29, 28, 30],
+
+    // Front Right Leg
+    [14, 32, 21], [12, 35, 14], [32, 33, 34], [32, 34, 35], [33, 35, 34],
+    // Front Left Leg
+    [15, 22, 36], [13, 15, 39], [36, 38, 37], [36, 39, 38], [37, 38, 39],
+
+    // Back Right Leg
+    [23, 40, 28], [26, 23, 43], [40, 41, 42], [40, 42, 43], [41, 43, 42],
+    // Back Left Leg
+    [24, 28, 44], [27, 47, 24], [44, 46, 45], [44, 47, 46], [45, 46, 47],
+  ];
+
+  const faces: Face[] = rawTriangles.map((vIds, id) => ({
+    id,
+    vertexIds: vIds,
+  }));
+
+  return {
+    vertices,
+    faces,
+    name: 'LowPoly Camel Sculpture (AUME Benchmark — 15 Anatomical Blanks)',
+  };
+}

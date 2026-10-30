@@ -82,6 +82,7 @@ export function projectRegionTo2D(
 ): {
   outerVertices2D: Vec2[];
   outerVertices3D: Vec3[];
+  outerEdgeIds2D: number[];
   holeLoops2D: Vec2[][];
 } {
   const normal = region.normal;
@@ -105,6 +106,7 @@ export function projectRegionTo2D(
 
   let outerVertices3D: Vec3[] = [];
   let outerVertices2D: Vec2[] = [];
+  let rawEdgeIds: number[] = [];
 
   if (outerLoop && outerLoop.vertexIds.length > 0) {
     for (const vId of outerLoop.vertexIds) {
@@ -114,6 +116,7 @@ export function projectRegionTo2D(
         outerVertices2D.push(projectPoint(v.position));
       }
     }
+    rawEdgeIds = outerLoop.edgeIds && outerLoop.edgeIds.length > 0 ? [...outerLoop.edgeIds] : [];
   } else {
     // Fallback: collect unique vertices from region faces
     const uniqueVIds = new Set<number>();
@@ -130,16 +133,26 @@ export function projectRegionTo2D(
         outerVertices2D.push(projectPoint(v.position));
       }
     }
+    rawEdgeIds = outerVertices2D.map((_, i) => i);
   }
 
-  // Simplify collinear boundary vertices (Section 21, rule 7)
-  outerVertices2D = simplifyPolygon2D(outerVertices2D, 1e-4);
+  // Synchronously simplify collinear boundary vertices across 2D, 3D, and edge IDs
+  const simplified = simplifyPolygonSynced(
+    outerVertices2D,
+    outerVertices3D,
+    rawEdgeIds,
+    1e-4
+  );
+  outerVertices2D = simplified.pts2D;
+  outerVertices3D = simplified.pts3D;
+  let outerEdgeIds2D = simplified.edgeIds;
 
   // Ensure counter-clockwise orientation
   const signedArea = calculatePolygonArea2D(outerVertices2D);
   if (signedArea < 0) {
     outerVertices2D.reverse();
     outerVertices3D.reverse();
+    outerEdgeIds2D = reversePolygonEdges(outerEdgeIds2D);
   }
 
   const holeLoops2D: Vec2[][] = [];
@@ -159,6 +172,7 @@ export function projectRegionTo2D(
   return {
     outerVertices2D,
     outerVertices3D,
+    outerEdgeIds2D,
     holeLoops2D,
   };
 }
@@ -172,6 +186,76 @@ export function calculatePolygonArea2D(pts: Vec2[]): number {
     area -= pts[j][0] * pts[i][1];
   }
   return area * 0.5;
+}
+
+/**
+ * Reverses polygon edge IDs to maintain segment-to-edge mapping when polygon vertices are reversed.
+ */
+export function reversePolygonEdges(edgeIds: number[]): number[] {
+  const N = edgeIds.length;
+  if (N <= 1) return [...edgeIds];
+  const result = new Array<number>(N);
+  for (let k = 0; k < N - 1; k++) {
+    result[k] = edgeIds[N - 2 - k];
+  }
+  result[N - 1] = edgeIds[N - 1];
+  return result;
+}
+
+/**
+ * Synchronously simplifies collinear boundary vertices across 2D coordinates,
+ * 3D coordinates, and mesh edge IDs, preserving topological identity and exact sync.
+ */
+export function simplifyPolygonSynced(
+  pts2D: Vec2[],
+  pts3D: Vec3[],
+  edgeIds: number[],
+  tolerance: number = 1e-4
+): { pts2D: Vec2[]; pts3D: Vec3[]; edgeIds: number[] } {
+  const n = pts2D.length;
+  if (n <= 3) {
+    const safeEdgeIds =
+      edgeIds.length === n
+        ? edgeIds
+        : Array.from({ length: n }, (_, i) => edgeIds[i] ?? i);
+    return { pts2D, pts3D, edgeIds: safeEdgeIds };
+  }
+
+  const safeEdgeIds =
+    edgeIds.length === n
+      ? [...edgeIds]
+      : Array.from({ length: n }, (_, i) => edgeIds[i] ?? i);
+
+  const keepIndices: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const prev = pts2D[(i - 1 + n) % n];
+    const curr = pts2D[i];
+    const next = pts2D[(i + 1) % n];
+
+    const lineDx = next[0] - prev[0];
+    const lineDy = next[1] - prev[1];
+    const lineLen = Math.sqrt(lineDx * lineDx + lineDy * lineDy);
+
+    if (lineLen < 1e-7) {
+      continue; // Duplicate point
+    }
+
+    const dist =
+      Math.abs(lineDx * (prev[1] - curr[1]) - (prev[0] - curr[0]) * lineDy) / lineLen;
+    if (dist > tolerance) {
+      keepIndices.push(i);
+    }
+  }
+
+  if (keepIndices.length < 3) {
+    return { pts2D, pts3D, edgeIds: safeEdgeIds };
+  }
+
+  return {
+    pts2D: keepIndices.map((i) => pts2D[i]),
+    pts3D: keepIndices.map((i) => pts3D[i] ?? [0, 0, 0]),
+    edgeIds: keepIndices.map((i) => safeEdgeIds[i]),
+  };
 }
 
 export function simplifyPolygon2D(points: Vec2[], tolerance: number = 1e-4): Vec2[] {
@@ -201,18 +285,72 @@ export function simplifyPolygon2D(points: Vec2[], tolerance: number = 1e-4): Vec
   return result.length >= 3 ? result : points;
 }
 
+/**
+ * Computes manufacturing sectors based on topological adjacency clusters (Section 13).
+ * Replaces arbitrary index grouping with connected manifold component sectors.
+ */
+export function computeManufacturingSectors(regions: GeometryRegion[]): Map<number, number> {
+  const sectorMap = new Map<number, number>();
+  if (regions.length === 0) return sectorMap;
+
+  const adj = new Map<number, number[]>();
+  for (const r of regions) {
+    adj.set(r.id, (r.neighbors || []).map((n) => n.neighborRegionId));
+  }
+
+  const visited = new Set<number>();
+  let currentSector = 1;
+  const maxPerSector = Math.max(4, Math.min(12, Math.ceil(regions.length / 6)));
+
+  for (const r of regions) {
+    if (visited.has(r.id)) continue;
+
+    const queue = [r.id];
+    visited.add(r.id);
+    let countInSector = 0;
+
+    while (queue.length > 0) {
+      const curr = queue.shift()!;
+      sectorMap.set(curr, currentSector);
+      countInSector++;
+
+      if (countInSector >= maxPerSector) {
+        currentSector++;
+        countInSector = 0;
+      }
+
+      const neighbors = adj.get(curr) || [];
+      for (const nb of neighbors) {
+        if (!visited.has(nb)) {
+          visited.add(nb);
+          queue.push(nb);
+        }
+      }
+    }
+
+    if (countInSector > 0) {
+      currentSector++;
+    }
+  }
+
+  return sectorMap;
+}
+
 export function buildSmartPanels(
   regions: GeometryRegion[],
   mesh: MeshInput
 ): SmartPanel[] {
-  return regions.map((region, idx) => {
+  const sectorMap = computeManufacturingSectors(regions);
+
+  return regions.map((region) => {
     const id = generateStablePanelId(region);
-    const { outerVertices2D, outerVertices3D, holeLoops2D } = projectRegionTo2D(
+    const { outerVertices2D, outerVertices3D, outerEdgeIds2D, holeLoops2D } = projectRegionTo2D(
       region,
       mesh
     );
     const confidence = calculatePanelConfidence(region);
     const type = classifyPanelType(outerVertices2D.length, region.faceIds.size);
+    const sectorId = sectorMap.get(region.id) ?? 1;
 
     return {
       id,
@@ -224,10 +362,11 @@ export function buildSmartPanels(
       boundaryVertexCount: outerVertices2D.length,
       outerVertices2D,
       outerVertices3D,
+      outerEdgeIds2D,
       holeLoops2D,
       normal: region.normal,
       centroid3D: region.centroid,
-      sectorId: Math.floor(idx / 4),
+      sectorId,
       composite: region.faceIds.size > 1,
     };
   });

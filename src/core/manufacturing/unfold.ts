@@ -4,7 +4,8 @@
  * Specification Compliant: Sections 28 - 37, 44, 47, 48, 70, 71
  */
 
-import { GeometryReconstructionResult, Vec2 } from '../geometry/types';
+import { GeometryReconstructionResult, Vec2, Vec3 } from '../geometry/types';
+import { cross, dot, sub } from '../geometry/math';
 import {
   ManufacturingSettings,
   SmartPanel,
@@ -15,6 +16,89 @@ import {
   BendWarningState,
 } from './types';
 import { generateAssemblyTabs } from './tabs';
+import { generateHingeCutPattern } from './hingeCut';
+
+function dist3D(a: Vec3, b: Vec3): number {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const dz = b[2] - a[2];
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+/**
+ * Finds shared 3D edge vertices between two smart panels
+ */
+function findShared3DEdge(
+  pA: SmartPanel,
+  pB: SmartPanel,
+  sharedEdgeIds?: number[]
+): { start: Vec3; end: Vec3 } | null {
+  // If we have sharedEdgeIds and outerEdgeIds2D on pA, locate exact 3D coordinates
+  if (sharedEdgeIds && sharedEdgeIds.length > 0 && pA.outerEdgeIds2D && pA.outerVertices3D) {
+    for (const eId of sharedEdgeIds) {
+      const idxA = pA.outerEdgeIds2D.indexOf(eId);
+      if (idxA !== -1 && idxA < pA.outerVertices3D.length) {
+        const start = pA.outerVertices3D[idxA];
+        const end = pA.outerVertices3D[(idxA + 1) % pA.outerVertices3D.length];
+        return { start, end };
+      }
+    }
+  }
+
+  const vertsA = pA.outerVertices3D;
+  const vertsB = pB.outerVertices3D;
+  if (!vertsA || !vertsB || vertsA.length < 2 || vertsB.length < 2) return null;
+
+  for (let i = 0; i < vertsA.length; i++) {
+    const a1 = vertsA[i];
+    const a2 = vertsA[(i + 1) % vertsA.length];
+    for (let j = 0; j < vertsB.length; j++) {
+      const b1 = vertsB[j];
+      const b2 = vertsB[(j + 1) % vertsB.length];
+      const d1 = dist3D(a1, b2);
+      const d2 = dist3D(a2, b1);
+      if (d1 < 1.0 && d2 < 1.0) {
+        return { start: a1, end: a2 };
+      }
+      const d1_rev = dist3D(a1, b1);
+      const d2_rev = dist3D(a2, b2);
+      if (d1_rev < 1.0 && d2_rev < 1.0) {
+        return { start: a1, end: a2 };
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Classifies a shared edge as MOUNTAIN or VALLEY fold based on face normals and 3D edge direction.
+ * sign = dot(cross(n1, n2), edgeDirection)
+ * positive => convex (mountain), negative => concave (valley)
+ */
+export function classifyFoldDirection(
+  normalA: Vec3,
+  normalB: Vec3,
+  edgeStart3D?: Vec3,
+  edgeEnd3D?: Vec3,
+  centroidA?: Vec3,
+  centroidB?: Vec3
+): 'MOUNTAIN' | 'VALLEY' {
+  if (edgeStart3D && edgeEnd3D) {
+    const edgeDir = sub(edgeEnd3D, edgeStart3D);
+    const crossN = cross(normalA, normalB);
+    const s = dot(crossN, edgeDir);
+    if (Math.abs(s) > 1e-5) {
+      return s >= 0 ? 'MOUNTAIN' : 'VALLEY';
+    }
+  }
+  // Geometric fallback: check displacement between centroids relative to normal A
+  if (centroidA && centroidB) {
+    const d = sub(centroidB, centroidA);
+    const s = dot(d, normalA);
+    return s <= 0 ? 'MOUNTAIN' : 'VALLEY';
+  }
+  return 'MOUNTAIN';
+}
 
 /**
  * Computes bend allowance using standard sheet metal formula:
@@ -266,6 +350,36 @@ function findMatchingEdge(
 }
 
 /**
+ * Finds edge on polygon by mesh edge ID (topological matching),
+ * falling back to length matching if edge IDs are not available or not matched.
+ */
+export function findEdgeByMeshEdgeId(
+  poly: Vec2[],
+  edgeIds: number[] | undefined,
+  targetEdgeIds: number[],
+  targetLength: number
+): { index: number; p1: Vec2; p2: Vec2; diff: number } {
+  if (edgeIds && edgeIds.length > 0 && targetEdgeIds && targetEdgeIds.length > 0) {
+    for (const targetId of targetEdgeIds) {
+      const idx = edgeIds.indexOf(targetId);
+      if (idx !== -1) {
+        const p1 = poly[idx];
+        const p2 = poly[(idx + 1) % poly.length];
+        const len = dist2D(p1, p2);
+        return {
+          index: idx,
+          p1,
+          p2,
+          diff: Math.abs(len - targetLength),
+        };
+      }
+    }
+  }
+  // Fallback to geometric length matching
+  return findMatchingEdge(poly, targetLength);
+}
+
+/**
  * Runs Incremental Unfold Pipeline with 2D Collision Prevention (Sections 34 - 37)
  */
 export function performIncrementalUnfold(
@@ -316,16 +430,27 @@ export function performIncrementalUnfold(
       settings.kFactor
     );
 
+    const shared3D = findShared3DEdge(pA, pB, adj.sharedEdgeIds);
+    const foldType = classifyFoldDirection(
+      pA.normal,
+      pB.normal,
+      shared3D?.start,
+      shared3D?.end,
+      pA.centroid3D,
+      pB.centroid3D
+    );
+
     if (isFeasibleBend && warningState !== 'SEVERE_BEND') {
       candidateBends.push({
         edgeId: adj.sharedEdgeIds[0] ?? 0,
+        sharedEdgeIds: adj.sharedEdgeIds,
         regionA: pA.regionId,
         regionB: pB.regionId,
         panelAId: pA.id,
         panelBId: pB.id,
         length,
         bendAngleDeg: angleDeg,
-        bendType: 'MOUNTAIN',
+        bendType: foldType,
         allowance,
         radius: settings.bendRadius,
         warningState,
@@ -333,6 +458,7 @@ export function performIncrementalUnfold(
     } else {
       allSeams.push({
         edgeId: adj.sharedEdgeIds[0] ?? 0,
+        sharedEdgeIds: adj.sharedEdgeIds,
         regionA: pA.regionId,
         regionB: pB.regionId,
         length,
@@ -381,6 +507,7 @@ export function performIncrementalUnfold(
       panelId: rootPanel.id,
       regionId: rootPanel.regionId,
       vertices2D: rootPanel.outerVertices2D,
+      edgeIds2D: rootPanel.outerEdgeIds2D,
       center2D: getPolygonCentroid2D(rootPanel.outerVertices2D),
       rotationRad: 0,
     });
@@ -403,6 +530,7 @@ export function performIncrementalUnfold(
           if (!allSeams.some((s) => s.edgeId === bend.edgeId)) {
             allSeams.push({
               edgeId: bend.edgeId,
+              sharedEdgeIds: bend.sharedEdgeIds,
               regionA: bend.regionA,
               regionB: bend.regionB,
               length: bend.length,
@@ -420,10 +548,25 @@ export function performIncrementalUnfold(
         const childPanel = panelMap.get(neighborId);
         if (!childPanel) continue;
 
-        // Find shared edge on parent in placed 2D coordinates
-        const parentEdge = findMatchingEdge(parentPlaced.vertices2D, bend.length);
-        // Find shared edge on child in local 2D coordinates
-        const childEdge = findMatchingEdge(childPanel.outerVertices2D, bend.length);
+        const targetEdgeIds =
+          bend.sharedEdgeIds && bend.sharedEdgeIds.length > 0
+            ? bend.sharedEdgeIds
+            : [bend.edgeId];
+
+        // Find shared edge on parent in placed 2D coordinates using exact mesh edge IDs
+        const parentEdge = findEdgeByMeshEdgeId(
+          parentPlaced.vertices2D,
+          parentPlaced.edgeIds2D,
+          targetEdgeIds,
+          bend.length
+        );
+        // Find shared edge on child in local 2D coordinates using exact mesh edge IDs
+        const childEdge = findEdgeByMeshEdgeId(
+          childPanel.outerVertices2D,
+          childPanel.outerEdgeIds2D,
+          targetEdgeIds,
+          bend.length
+        );
 
         // Compute hinged 2D transformation
         const candidateChildVerts = transformChildPolygonAcrossHinge(
@@ -448,6 +591,7 @@ export function performIncrementalUnfold(
           overlapAvoidanceCount++;
           allSeams.push({
             edgeId: bend.edgeId,
+            sharedEdgeIds: bend.sharedEdgeIds,
             regionA: bend.regionA,
             regionB: bend.regionB,
             length: bend.length,
@@ -468,9 +612,22 @@ export function performIncrementalUnfold(
             panelId: childPanel.id,
             regionId: childPanel.regionId,
             vertices2D: candidateChildVerts,
+            edgeIds2D: childPanel.outerEdgeIds2D,
             center2D: getPolygonCentroid2D(candidateChildVerts),
             rotationRad: 0,
           });
+
+          const hingePattern = generateHingeCutPattern(
+            bend.edgeId,
+            parentEdge.p1,
+            parentEdge.p2,
+            bend.bendType,
+            settings
+          );
+
+          bend.hingeCutPattern = hingePattern;
+          bend.startPoint2D = parentEdge.p1;
+          bend.endPoint2D = parentEdge.p2;
 
           componentBends2D.push({
             edgeId: bend.edgeId,
@@ -478,6 +635,7 @@ export function performIncrementalUnfold(
             end: parentEdge.p2,
             angleDeg: bend.bendAngleDeg,
             bendType: bend.bendType,
+            hingeCutPattern: hingePattern,
           });
 
           queue.push(neighborId);
@@ -545,6 +703,42 @@ export function performIncrementalUnfold(
     totalUnfoldedArea += p.area;
   }
 
+  // 5. Classify components into Main Panels vs Detached Patches (AUME Specification: Max Connected Area)
+  // Main Panels (>85% of total area): continuous multi-panel sheets with internal living hinges.
+  // Detached Patches: small impossible-to-unfold patches (<= 3 panels) detached to avoid self-intersection.
+  let mainConnectedArea = 0;
+  let mainCount = 0;
+  let detachedCount = 0;
+
+  for (const comp of components) {
+    let compArea = 0;
+    for (const pId of comp.panelIds) {
+      const p = panelById.get(pId);
+      if (p) compArea += p.area;
+    }
+    comp.componentArea = compArea;
+
+    const isPatch =
+      components.length > 1 &&
+      comp.panelIds.length <= 3 &&
+      compArea < totalUnfoldedArea * 0.08;
+
+    comp.isDetachedPatch = isPatch;
+    comp.componentType = isPatch ? 'DETACHED_PATCH' : 'MAIN_PANEL';
+
+    if (!isPatch) {
+      mainConnectedArea += compArea;
+      mainCount++;
+    } else {
+      detachedCount++;
+    }
+  }
+
+  const maxConnectedAreaPercent =
+    totalUnfoldedArea > 0
+      ? Math.round((mainConnectedArea / totalUnfoldedArea) * 1000) / 10
+      : 100;
+
   return {
     components,
     allBends: finalizedBends,
@@ -553,5 +747,8 @@ export function performIncrementalUnfold(
     residualOverlaps: 0,
     overlapAvoidanceSeams: overlapAvoidanceCount,
     totalUnfoldedArea,
+    maxConnectedAreaPercent,
+    mainComponentsCount: mainCount,
+    detachedPatchesCount: detachedCount,
   };
 }

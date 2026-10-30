@@ -4,7 +4,7 @@
  * Specification Compliant: Sections 50, 51, 62, 70, 71
  */
 
-import { Vec3 } from '../geometry/types';
+import { Vec3, GeometryReconstructionResult } from '../geometry/types';
 import {
   SmartPanel,
   UnfoldResult,
@@ -46,16 +46,19 @@ function computeCentroid3D(pts: Vec3[]): Vec3 {
 export function buildKinematicSimulation(
   panels: SmartPanel[],
   unfold: UnfoldResult,
-  assembly: AssemblyMap
+  context?: GeometryReconstructionResult | AssemblyMap | null,
+  requestedFrameCount: number = 20
 ): KinematicSimulation {
   // Map panel 2D flat vertices into 3D plane (z = 0)
-  // Look up placement from unfold clusters
+  // Look up placement from unfold components
   const panelFlat3DMap = new Map<string, Vec3[]>();
 
-  for (const cluster of unfold.clusters) {
-    for (const cp of cluster.panels) {
-      const flat3DPts: Vec3[] = cp.vertices2D.map((p2) => [p2[0], p2[1], 0]);
-      panelFlat3DMap.set(cp.panel.id, flat3DPts);
+  if (unfold && unfold.components) {
+    for (const comp of unfold.components) {
+      for (const p2d of comp.panels2D) {
+        const flat3DPts: Vec3[] = p2d.vertices2D.map((p2) => [p2[0], p2[1], 0]);
+        panelFlat3DMap.set(p2d.panelId, flat3DPts);
+      }
     }
   }
 
@@ -64,20 +67,27 @@ export function buildKinematicSimulation(
     if (!panelFlat3DMap.has(p.id)) {
       panelFlat3DMap.set(
         p.id,
-        p.outerVertices2D.map((p2) => [p2[0], p2[1], 0])
+        (p.outerVertices2D || []).map((p2) => [p2[0], p2[1], 0])
       );
     }
   }
 
-  // Prepare sequence of steps based on assembly sequence
+  // Prepare sequence of steps based on assembly sequence or panel order
   const steps: KinematicStep[] = [];
-  const seq = assembly.assemblySequence.length > 0
-    ? assembly.assemblySequence
-    : panels.map((p) => p.id);
+  let seq: string[] = [];
+
+  if (context && 'assemblySequence' in context && Array.isArray(context.assemblySequence) && context.assemblySequence.length > 0) {
+    seq = context.assemblySequence;
+  } else {
+    seq = panels.map((p) => p.id);
+  }
 
   seq.forEach((panelId, idx) => {
-    const node = assembly.nodes.find((n) => n.panelId === panelId);
-    const desc = node?.instruction || `ثني وتركيب اللوح رقم ${idx + 1} (${panelId})`;
+    let desc = `ثني وتركيب اللوح رقم ${idx + 1} (${panelId})`;
+    if (context && 'nodes' in context && Array.isArray((context as AssemblyMap).nodes)) {
+      const node = (context as AssemblyMap).nodes.find((n) => n.panelId === panelId);
+      if (node?.instruction) desc = node.instruction;
+    }
     steps.push({
       stepIndex: idx,
       panelId,
@@ -101,7 +111,7 @@ export function buildKinematicSimulation(
     const panelStates: KinematicPanelState[] = [];
 
     for (const panel of panels) {
-      const flatPts = panelFlat3DMap.get(panel.id) || panel.outerVertices2D.map((p2) => [p2[0], p2[1], 0]);
+      const flatPts = panelFlat3DMap.get(panel.id) || (panel.outerVertices2D || []).map((p2) => [p2[0], p2[1], 0]);
       const target3DPts = panel.outerVertices3D;
 
       // Find where this panel sits in the assembly sequence
@@ -154,10 +164,21 @@ export function buildKinematicSimulation(
     };
   };
 
+  // Precompute frames
+  const frameCount = requestedFrameCount > 0 ? requestedFrameCount : 20;
+  const frames: KinematicFrame[] = [];
+  for (let i = 0; i <= frameCount; i++) {
+    frames.push(getFrameAtProgress(i / frameCount));
+  }
+
+  const totalBendsCount = unfold?.allBends?.length || 0;
+
   return {
     steps,
-    frameCount: 100,
+    frameCount: frames.length,
     totalAssemblyDurationSec: totalSteps * 1.5,
+    frames,
+    totalBendsCount,
     getFrameAtProgress,
   };
 }

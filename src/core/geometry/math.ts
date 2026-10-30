@@ -153,6 +153,109 @@ export function makeStableRegionKey(seedFaceKey: string): string {
   return `R:${seedFaceKey.replace('F:', '')}`;
 }
 
+export interface FaceGeometryLike {
+  positions: [Vec3, Vec3, Vec3];
+  centroid: Vec3;
+  normal: Vec3;
+  area: number;
+}
+
+/**
+ * Area-Weighted Analytical PCA Best-Fit Plane for 3D surfaces (Section 14, 31-33).
+ * Integrates continuous second moments over triangle surfaces.
+ * Invariant to triangulation density, vertex placement, or subdivision schemes.
+ */
+export function computeAreaWeightedPCAForFaces(faces: Iterable<FaceGeometryLike>): Plane {
+  let totalArea = 0;
+  let cX = 0, cY = 0, cZ = 0;
+  let avgNx = 0, avgNy = 0, avgNz = 0;
+  let faceCount = 0;
+
+  for (const f of faces) {
+    const a = Math.max(1e-12, f.area);
+    totalArea += a;
+    cX += a * f.centroid[0];
+    cY += a * f.centroid[1];
+    cZ += a * f.centroid[2];
+    avgNx += a * f.normal[0];
+    avgNy += a * f.normal[1];
+    avgNz += a * f.normal[2];
+    faceCount++;
+  }
+
+  if (faceCount === 0 || totalArea <= 1e-12) {
+    return { origin: [0, 0, 0], normal: [0, 0, 1] };
+  }
+
+  const centroid: Vec3 = [cX / totalArea, cY / totalArea, cZ / totalArea];
+
+  // Exact continuous covariance integration over triangles:
+  // int_{T_i} (p - C)_a * (p - C)_b dA = (A_i / 12) * [ sum_{j=0..2} u_j,a * u_j,b + 9 * C'_i,a * C'_i,b ]
+  let c00 = 0, c01 = 0, c02 = 0;
+  let c11 = 0, c12 = 0, c22 = 0;
+
+  for (const f of faces) {
+    const a = Math.max(1e-12, f.area);
+    const p0 = f.positions[0];
+    const p1 = f.positions[1];
+    const p2 = f.positions[2];
+
+    const u0: Vec3 = [p0[0] - centroid[0], p0[1] - centroid[1], p0[2] - centroid[2]];
+    const u1: Vec3 = [p1[0] - centroid[0], p1[1] - centroid[1], p1[2] - centroid[2]];
+    const u2: Vec3 = [p2[0] - centroid[0], p2[1] - centroid[1], p2[2] - centroid[2]];
+
+    const cPrime: Vec3 = [
+      f.centroid[0] - centroid[0],
+      f.centroid[1] - centroid[1],
+      f.centroid[2] - centroid[2],
+    ];
+
+    const factor = a / 12;
+
+    c00 += factor * (u0[0] * u0[0] + u1[0] * u1[0] + u2[0] * u2[0] + 9 * cPrime[0] * cPrime[0]);
+    c01 += factor * (u0[0] * u0[1] + u1[0] * u1[1] + u2[0] * u2[1] + 9 * cPrime[0] * cPrime[1]);
+    c02 += factor * (u0[0] * u0[2] + u1[0] * u1[2] + u2[0] * u2[2] + 9 * cPrime[0] * cPrime[2]);
+
+    c11 += factor * (u0[1] * u0[1] + u1[1] * u1[1] + u2[1] * u2[1] + 9 * cPrime[1] * cPrime[1]);
+    c12 += factor * (u0[1] * u0[2] + u1[1] * u1[2] + u2[1] * u2[2] + 9 * cPrime[1] * cPrime[2]);
+
+    c22 += factor * (u0[2] * u0[2] + u1[2] * u1[2] + u2[2] * u2[2] + 9 * cPrime[2] * cPrime[2]);
+  }
+
+  const cov: number[][] = [
+    [c00 / totalArea, c01 / totalArea, c02 / totalArea],
+    [c01 / totalArea, c11 / totalArea, c12 / totalArea],
+    [c02 / totalArea, c12 / totalArea, c22 / totalArea],
+  ];
+
+  const { eigenvalues, eigenvectors } = jacobiEigen3x3(cov);
+
+  let minIdx = 0;
+  let minVal = eigenvalues[0];
+  for (let i = 1; i < 3; i++) {
+    if (eigenvalues[i] < minVal) {
+      minVal = eigenvalues[i];
+      minIdx = i;
+    }
+  }
+
+  const rawNormal: Vec3 = [
+    eigenvectors[0][minIdx],
+    eigenvectors[1][minIdx],
+    eigenvectors[2][minIdx],
+  ];
+
+  let normal = normalize(rawNormal);
+
+  // Align normal with area-weighted average triangle normal
+  const dotNorm = normal[0] * avgNx + normal[1] * avgNy + normal[2] * avgNz;
+  if (dotNorm < 0) {
+    normal = [-normal[0], -normal[1], -normal[2]];
+  }
+
+  return { origin: centroid, normal };
+}
+
 /**
  * PCA Best-Fit Plane for 3D point cloud (Section 14, 31-33).
  * Given an array of 3D points, computes:

@@ -145,12 +145,16 @@ export const ThreeViewport: React.FC<ThreeViewportProps> = ({
 
     if (mesh.faces.length === 0 || mesh.vertices.length === 0) return;
 
-    // Map faceId -> panel
-    const faceToPanel = new Map<number, SmartPanel>();
-    panels.forEach((p) => {
-      // Find faces belonging to this region
-      p.outerVertices3D;
-    });
+    // Map faceId / vertex -> panel with spatial hash for instant O(1) lookup
+    const vertexToPanel = new Map<string, SmartPanel>();
+    for (const p of panels) {
+      for (const ov of p.outerVertices3D) {
+        const key = `${Math.round(ov[0] * 100)},${Math.round(ov[1] * 100)},${Math.round(ov[2] * 100)}`;
+        if (!vertexToPanel.has(key)) {
+          vertexToPanel.set(key, p);
+        }
+      }
+    }
 
     // 1. Build Base Mesh Geometry
     const positions: number[] = [];
@@ -193,16 +197,25 @@ export const ThreeViewport: React.FC<ThreeViewportProps> = ({
       // Face Color determination
       let faceColor = defaultMeshColor;
 
-      if (viewMode === 'largeFaces' || viewMode === 'manufacturing') {
-        // Find which panel this face belongs to
-        const panelMatch = panels.find((p) =>
-          p.outerVertices3D.some(
-            (ov) =>
-              Math.abs(ov[0] - v0[0]) < 1e-4 &&
-              Math.abs(ov[1] - v0[1]) < 1e-4 &&
-              Math.abs(ov[2] - v0[2]) < 1e-4
-          )
-        );
+      if (viewMode === 'manufacturing' && unfold) {
+        const v0Key = `${Math.round(v0[0] * 100)},${Math.round(v0[1] * 100)},${Math.round(v0[2] * 100)}`;
+        const panelMatch = vertexToPanel.get(v0Key);
+
+        if (panelMatch) {
+          if (panelMatch.id === selectedPanelId) {
+            faceColor = selectedColor;
+          } else {
+            const comp = unfold.components.find((c) => c.panelIds.includes(panelMatch.id));
+            if (comp?.isDetachedPatch) {
+              faceColor = new THREE.Color(0xf59e0b); // Amber for Detached Patch to Weld
+            } else {
+              faceColor = new THREE.Color(0x94a3b8); // Metallic Slate for Main Continuous Blank
+            }
+          }
+        }
+      } else if (viewMode === 'largeFaces' || viewMode === 'manufacturing') {
+        const v0Key = `${Math.round(v0[0] * 100)},${Math.round(v0[1] * 100)},${Math.round(v0[2] * 100)}`;
+        const panelMatch = vertexToPanel.get(v0Key);
 
         if (panelMatch) {
           if (panelMatch.id === selectedPanelId) {
@@ -457,6 +470,19 @@ export const ThreeViewport: React.FC<ThreeViewportProps> = ({
         <span>🖱️ زر الفأرة الأيمن: تحريك (Pan)</span>
         <span>🔍 عجلة الفأرة: تكبير / تصغير</span>
       </div>
+
+      {viewMode === 'manufacturing' && unfold && (
+        <div className="absolute bottom-3 right-3 bg-slate-900/90 text-white backdrop-blur-sm border border-slate-700 px-3 py-1.5 rounded-lg text-xs shadow-md pointer-events-none flex items-center gap-3">
+          <div className="flex items-center gap-1.5">
+            <span className="w-2.5 h-2.5 rounded-xs bg-slate-400" />
+            <span className="font-medium text-slate-200">قطاع رئيسي متصل ({unfold.mainComponentsCount})</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="w-2.5 h-2.5 rounded-xs bg-amber-500" />
+            <span className="font-medium text-amber-300">رقعة للحام ({unfold.detachedPatchesCount})</span>
+          </div>
+        </div>
+      )}
 
       {/* Selection badge */}
       {selectedPanelId && (

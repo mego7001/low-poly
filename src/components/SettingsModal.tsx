@@ -133,6 +133,32 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 />
               </div>
 
+              <div className="sm:col-span-2">
+                <label className="block text-slate-600 mb-1 font-medium">
+                  استراتيجية توزيع الأجزاء على الألواح (Nesting Strategy):
+                </label>
+                <select
+                  value={mfgSettings.nestingStrategy || 'individual'}
+                  onChange={(e) =>
+                    onChangeMfgSettings({
+                      ...mfgSettings,
+                      nestingStrategy: e.target.value as 'components' | 'individual',
+                    })
+                  }
+                  className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-slate-800 font-medium"
+                >
+                  <option value="components">
+                    قطع مجمعة متصلة (Unfolded Components) — الأفضل لتصنيع الصاج والليزر (4 بتلات للكورة)
+                  </option>
+                  <option value="individual">
+                    ألواح مفردة منفصلة (Individual Panels) — للقص اليدوي والتجميع باللحام الكامل (60 جزء للكورة)
+                  </option>
+                </select>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  النمط المجمع يدمج الألواح المترابطة داخل كل قطاع ويوفر خطوط الثني والتفريغ المفصلي Hinge Cuts، مما يقلل عدد الأجزاء من 60 إلى 4 فقط للكورة.
+                </p>
+              </div>
+
               <div>
                 <label className="block text-slate-600 mb-1">نوع الخامة والمادة:</label>
                 <select
@@ -158,7 +184,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {/* Section 2: Sheet Metal Bending & Allowance */}
           <div>
             <h4 className="font-semibold text-slate-900 text-sm mb-3 pb-1 border-b border-slate-100">
-              ٢. حسابات الثني بالمكبس (Press Brake & Bend Allowance)
+              ٢. قيود الثني الصناعي وإمكانية الطي (Bend Feasibility & Allowance)
             </h4>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <div>
@@ -211,10 +237,110 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
           </div>
 
-          {/* Section 3: Geometry Core V2 Tolerances */}
+          {/* Section 3: Perforated Hinge Cut / Wave-Dot Pattern */}
+          <div className="bg-amber-50/60 p-4 rounded-xl border border-amber-200/70">
+            <div className="flex items-center justify-between mb-2">
+              <h4 className="font-semibold text-amber-950 text-sm">
+                ٣. باترون القطع المنقط للطي اليدوي (Perforated Hinge Cut Pattern)
+              </h4>
+              <span className="text-[10px] px-2 py-0.5 bg-amber-200 text-amber-900 rounded font-mono font-medium">
+                Hand-Bent Laser Hinge
+              </span>
+            </div>
+            <p className="text-[11px] text-amber-800/90 mb-3 leading-relaxed">
+              يتم تحويل خطوط الطي إلى سلسلة قطوع ليزرية متقطعة (Dashes) على طبقة القطع CUT تفصل بينها جسور معدنية غير مقطوعة (Tabs) تتيح طي وتشكيل المجسم يدويًا بالكامل بسهولة وبدون تشوه.
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+              <div>
+                <label className="block text-slate-700 mb-1">طول جزء القطع Dash (مم):</label>
+                <input
+                  type="number"
+                  step="0.5"
+                  value={mfgSettings.hingeDashLength}
+                  onChange={(e) =>
+                    onChangeMfgSettings({
+                      ...mfgSettings,
+                      hingeDashLength: parseFloat(e.target.value) || 4.0,
+                    })
+                  }
+                  className="w-full px-3 py-1.5 bg-white border border-amber-200 rounded-lg font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-700 mb-1">طول الجسر Tab (مم):</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  value={mfgSettings.hingeTabLength}
+                  onChange={(e) =>
+                    onChangeMfgSettings({
+                      ...mfgSettings,
+                      hingeTabLength: parseFloat(e.target.value) || 0.6,
+                    })
+                  }
+                  className="w-full px-3 py-1.5 bg-white border border-amber-200 rounded-lg font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-700 mb-1">تباعد الجسور Density (مم):</label>
+                <input
+                  type="number"
+                  step="1"
+                  value={mfgSettings.hingeTabDensityMm}
+                  onChange={(e) =>
+                    onChangeMfgSettings({
+                      ...mfgSettings,
+                      hingeTabDensityMm: parseFloat(e.target.value) || 18,
+                    })
+                  }
+                  className="w-full px-3 py-1.5 bg-white border border-amber-200 rounded-lg font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-700 mb-1">أقل عدد جسور لكل خط:</label>
+                <input
+                  type="number"
+                  step="1"
+                  min="1"
+                  value={mfgSettings.hingeMinTabCount}
+                  onChange={(e) =>
+                    onChangeMfgSettings({
+                      ...mfgSettings,
+                      hingeMinTabCount: parseInt(e.target.value, 10) || 2,
+                    })
+                  }
+                  className="w-full px-3 py-1.5 bg-white border border-amber-200 rounded-lg font-mono"
+                />
+              </div>
+            </div>
+
+            <div className="mt-3 flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="edgeTabRequired"
+                checked={mfgSettings.hingeEdgeTabRequired}
+                onChange={(e) =>
+                  onChangeMfgSettings({
+                    ...mfgSettings,
+                    hingeEdgeTabRequired: e.target.checked,
+                  })
+                }
+                className="rounded border-amber-300 text-amber-600 focus:ring-amber-500"
+              />
+              <label htmlFor="edgeTabRequired" className="text-[11px] text-amber-900 cursor-pointer select-none">
+                وضع جسر غير مقطوع إجباري عند طرفي كل حافة طي (يمنع سقوط أو انفصال الأوجه داخل ماكينة الليزر أثناء القطع)
+              </label>
+            </div>
+          </div>
+
+          {/* Section 4: Geometry Core V2 Tolerances */}
           <div>
             <h4 className="font-semibold text-slate-900 text-sm mb-3 pb-1 border-b border-slate-100">
-              ٣. معايير استعادة الأسطح الهندسية (Geometry Core V2 Gate Tolerances)
+              ٤. معايير استعادة الأسطح الهندسية (Geometry Core V2 Gate Tolerances)
             </h4>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>

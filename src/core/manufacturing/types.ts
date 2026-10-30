@@ -6,6 +6,8 @@
 
 import { Vec2, Vec3 } from '../geometry/types';
 
+export type NestingStrategy = 'components' | 'individual';
+
 export interface ManufacturingSettings {
   sheetWidth: number; // mm
   sheetHeight: number; // mm
@@ -21,6 +23,14 @@ export interface ManufacturingSettings {
   textSize: 'Small' | 'Medium' | 'Large' | 'Custom';
   customTextHeight: number; // mm
   maxBendAngle: number; // degrees
+  nestingStrategy?: NestingStrategy; // 'components': 4 petals for ball, 'individual': 60 separate panels
+
+  // === Hinge Cut Pattern Settings (Perforated Laser Dash+Tab) ===
+  hingeDashLength: number; // mm — cut length (default 4.0)
+  hingeTabLength: number; // mm — uncut bridge length (default 0.6)
+  hingeTabDensityMm: number; // spacing between tabs along edge in mm (default 18)
+  hingeMinTabCount: number; // minimum tabs per bend line (default 2)
+  hingeEdgeTabRequired: boolean; // mandatory uncut tab at line extremities (default true)
 }
 
 export const DEFAULT_MANUFACTURING_SETTINGS: ManufacturingSettings = {
@@ -38,6 +48,12 @@ export const DEFAULT_MANUFACTURING_SETTINGS: ManufacturingSettings = {
   textSize: 'Medium',
   customTextHeight: 5,
   maxBendAngle: 150,
+  nestingStrategy: 'individual',
+  hingeDashLength: 4.0,
+  hingeTabLength: 0.6,
+  hingeTabDensityMm: 18,
+  hingeMinTabCount: 2,
+  hingeEdgeTabRequired: true,
 };
 
 export type PanelType =
@@ -58,6 +74,7 @@ export interface SmartPanel {
   boundaryVertexCount: number;
   outerVertices2D: Vec2[];
   outerVertices3D: Vec3[];
+  outerEdgeIds2D: number[]; // meshEdgeId for each segment i -> (i+1)%N in outerVertices2D
   holeLoops2D: Vec2[][];
   normal: Vec3;
   centroid3D: Vec3;
@@ -72,8 +89,23 @@ export type BendWarningState =
   | 'SHORT_FLANGE'
   | 'OUT_OF_RANGE';
 
+export interface HingeDash {
+  start: Vec2;
+  end: Vec2;
+}
+
+export interface HingeCutPattern {
+  edgeId: number;
+  bendType: 'MOUNTAIN' | 'VALLEY';
+  dashes: HingeDash[]; // Actual cuts to place on CUT layer
+  tabGaps: HingeDash[]; // Uncut bridge gaps (for visualization / tabs)
+  totalLength: number;
+  tabCount: number;
+}
+
 export interface BendEdgeInfo {
   edgeId: number;
+  sharedEdgeIds?: number[];
   regionA: number;
   regionB: number;
   panelAId: string;
@@ -86,10 +118,12 @@ export interface BendEdgeInfo {
   warningState: BendWarningState;
   startPoint2D?: Vec2;
   endPoint2D?: Vec2;
+  hingeCutPattern?: HingeCutPattern;
 }
 
 export interface SeamCandidate {
   edgeId: number;
+  sharedEdgeIds?: number[];
   regionA: number;
   regionB: number;
   length: number;
@@ -134,6 +168,7 @@ export interface UnfoldComponent {
     panelId: string;
     regionId: number;
     vertices2D: Vec2[];
+    edgeIds2D?: number[];
     center2D: Vec2;
     rotationRad: number;
   }[];
@@ -143,6 +178,7 @@ export interface UnfoldComponent {
     end: Vec2;
     angleDeg: number;
     bendType: 'MOUNTAIN' | 'VALLEY';
+    hingeCutPattern?: HingeCutPattern;
   }[];
   tabs: AssemblyTab[];
   outerContour2D: Vec2[];
@@ -155,6 +191,9 @@ export interface UnfoldComponent {
     height: number;
   };
   hasOverlap: boolean;
+  isDetachedPatch?: boolean;
+  componentType?: 'MAIN_PANEL' | 'DETACHED_PATCH';
+  componentArea?: number;
 }
 
 export interface UnfoldResult {
@@ -165,6 +204,9 @@ export interface UnfoldResult {
   residualOverlaps: number;
   overlapAvoidanceSeams: number;
   totalUnfoldedArea: number;
+  maxConnectedAreaPercent: number; // e.g. > 85% connected area
+  mainComponentsCount: number;
+  detachedPatchesCount: number;
 }
 
 export interface PlacedPart {
@@ -175,13 +217,20 @@ export interface PlacedPart {
   y: number;
   rotationDeg: number;
   polygon: Vec2[];
+  isDetachedPatch?: boolean;
   bendLines: {
     start: Vec2;
     end: Vec2;
     angleDeg: number;
     bendType: 'MOUNTAIN' | 'VALLEY';
+    hingeCutPattern?: HingeCutPattern;
   }[];
   tabs?: AssemblyTab[];
+  subPanels?: {
+    panelId: string;
+    vertices2D: Vec2[];
+    center2D: Vec2;
+  }[];
   bounds: {
     width: number;
     height: number;
@@ -321,6 +370,7 @@ export interface ToolpathContour {
   panelId: string;
   sheetId: string;
   contourType: ToolpathContourType;
+  isInner: boolean;
   cutOrder: number;
   points: Vec2[];
   isClosed: boolean;
@@ -384,6 +434,8 @@ export interface KinematicSimulation {
   steps: KinematicStep[];
   frameCount: number;
   totalAssemblyDurationSec: number;
+  frames: KinematicFrame[];
+  totalBendsCount: number;
   getFrameAtProgress: (t: number) => KinematicFrame;
 }
 

@@ -8,12 +8,14 @@ import { Vec2 } from '../geometry/types';
 import {
   CNCSettings,
   ManufacturingSettings,
-  NestedSheet,
+  NestingSheet,
   ToolpathContour,
   ToolpathPlan,
   SheetToolpath,
-  PlacedPanel,
+  PlacedPart,
   AssemblyTab,
+  DEFAULT_CNC_SETTINGS,
+  DEFAULT_MANUFACTURING_SETTINGS,
 } from './types';
 
 /**
@@ -142,63 +144,37 @@ function computeLeadInPoint(firstPt: Vec2, secondPt: Vec2, lengthMm: number, cen
 }
 
 /**
- * Extracts raw cutting contours from a placed panel on a sheet
+ * Extracts raw cutting contours from a placed part on a sheet
  */
 function extractPanelContours(
-  placed: PlacedPanel,
+  placed: PlacedPart,
   sheetId: string,
-  settings: ManufacturingSettings,
-  cncSettings: CNCSettings
+  settings?: ManufacturingSettings,
+  cncSettings?: CNCSettings
 ): ToolpathContour[] {
+  const safeSettings = settings || DEFAULT_MANUFACTURING_SETTINGS;
+  const safeCnc = cncSettings || DEFAULT_CNC_SETTINGS;
   const contours: ToolpathContour[] = [];
-  const panel = placed.panel;
+  const panelId = placed.panelId || placed.partId;
 
-  // 1. Outer perimeter
-  let outerPts = placed.nestedVertices2D.map((p) => [p[0], p[1]] as Vec2);
-  const centroid = computeCentroid(outerPts);
-
-  // Apply geometry kerf offset if requested
-  if (cncSettings.kerfOffsetMode === 'geometry' && settings.kerf > 0) {
-    outerPts = applyKerfOffset(outerPts, settings.kerf / 2, true);
-  }
-
-  const outerLength = computePerimeter(outerPts);
-  const leadIn =
-    cncSettings.leadInType !== 'none' && outerPts.length >= 2
-      ? computeLeadInPoint(outerPts[0], outerPts[1], cncSettings.leadInLengthMm, centroid)
-      : outerPts[0];
-
-  contours.push({
-    id: `CONTOUR-OUTER-${panel.id}`,
-    panelId: panel.id,
-    sheetId,
-    contourType: 'outer_perimeter',
-    cutOrder: 0,
-    points: outerPts,
-    isClosed: true,
-    leadInPoint: leadIn,
-    leadOutPoint: outerPts[0],
-    contourLengthMm: Math.round(outerLength * 100) / 100,
-    piercePoint: leadIn,
-  });
-
-  // 2. Relief Tabs / Assembly Slots if present
+  // 1. Relief Tabs / Assembly Slots / Inner features if present (MUST BE CUT FIRST)
   if (placed.tabs && placed.tabs.length > 0) {
     placed.tabs.forEach((tab: AssemblyTab, idx: number) => {
-      // Create small relief contour for tab slot
-      const tabPts: Vec2[] = tab.geometry2D.map((p) => [p[0], p[1]] as Vec2);
+      // Create relief contour for tab slot
+      const tabPts: Vec2[] = tab.tabPolygon2D ? tab.tabPolygon2D.map((p) => [p[0], p[1]] as Vec2) : [];
       if (tabPts.length >= 2) {
         const tabCentroid = computeCentroid(tabPts);
         const tabLeadIn =
-          cncSettings.leadInType !== 'none' && tabPts.length >= 2
-            ? computeLeadInPoint(tabPts[0], tabPts[1], cncSettings.leadInLengthMm * 0.5, tabCentroid)
+          safeCnc.leadInType !== 'none' && tabPts.length >= 2
+            ? computeLeadInPoint(tabPts[0], tabPts[1], safeCnc.leadInLengthMm * 0.5, tabCentroid)
             : tabPts[0];
 
         contours.push({
-          id: `CONTOUR-TAB-${panel.id}-${idx}`,
-          panelId: panel.id,
+          id: `CONTOUR-TAB-${panelId}-${idx}`,
+          panelId,
           sheetId,
           contourType: 'relief_tab',
+          isInner: true,
           cutOrder: 0,
           points: tabPts,
           isClosed: false,
@@ -211,19 +187,125 @@ function extractPanelContours(
     });
   }
 
+  // 1.5 Perforated Hinge Cut Dashes (Cut BEFORE outer perimeter for sheet rigidity)
+  if (placed.bendLines && placed.bendLines.length > 0) {
+    placed.bendLines.forEach((bl, blIdx) => {
+      if (bl.hingeCutPattern && bl.hingeCutPattern.dashes.length > 0) {
+        bl.hingeCutPattern.dashes.forEach((dash, dashIdx) => {
+          const dashPts: Vec2[] = [dash.start, dash.end];
+          const dLen = dist2D(dash.start, dash.end);
+          if (dLen > 1e-4) {
+            contours.push({
+              id: `CONTOUR-HINGE-${panelId}-${blIdx}-${dashIdx}`,
+              panelId,
+              sheetId,
+              contourType: 'inner_feature',
+              isInner: true,
+              cutOrder: 0,
+              points: dashPts,
+              isClosed: false,
+              leadInPoint: dash.start,
+              leadOutPoint: dash.end,
+              contourLengthMm: Math.round(dLen * 100) / 100,
+              piercePoint: dash.start,
+            });
+          }
+        });
+      }
+    });
+  }
+
+  // 2. Outer perimeter (Cut LAST to maintain sheet stability)
+  let outerPts = (placed.polygon || []).map((p) => [p[0], p[1]] as Vec2);
+  if (outerPts.length >= 3) {
+    const centroid = computeCentroid(outerPts);
+
+    // Apply geometry kerf offset if requested
+    const kerf = safeSettings.kerf ?? 0.2;
+    if (safeCnc.kerfOffsetMode === 'geometry' && kerf > 0) {
+      outerPts = applyKerfOffset(outerPts, kerf / 2, true);
+    }
+
+    const outerLength = computePerimeter(outerPts);
+    const leadIn =
+      safeCnc.leadInType !== 'none' && outerPts.length >= 2
+        ? computeLeadInPoint(outerPts[0], outerPts[1], safeCnc.leadInLengthMm, centroid)
+        : outerPts[0];
+
+    contours.push({
+      id: `CONTOUR-OUTER-${panelId}`,
+      panelId,
+      sheetId,
+      contourType: 'outer_perimeter',
+      isInner: false,
+      cutOrder: 0,
+      points: outerPts,
+      isClosed: true,
+      leadInPoint: leadIn,
+      leadOutPoint: outerPts[0],
+      contourLengthMm: Math.round(outerLength * 100) / 100,
+      piercePoint: leadIn,
+    });
+  }
+
   return contours;
+}
+
+/**
+ * Fast nearest-neighbor path ordering for a set of contours.
+ * Uses O(1) swap-and-pop removal to avoid expensive array slicing.
+ */
+function orderContourSubset(
+  contours: ToolpathContour[],
+  startHead: Vec2
+): { ordered: ToolpathContour[]; endHead: Vec2 } {
+  const remaining = [...contours];
+  const ordered: ToolpathContour[] = [];
+  let curr = startHead;
+
+  while (remaining.length > 0) {
+    let bestIdx = 0;
+    let minSqDist = Infinity;
+
+    // Fast search without array allocations
+    for (let i = 0; i < remaining.length; i++) {
+      const c = remaining[i];
+      const pt = c.leadInPoint || c.points[0] || [0, 0];
+      const dx = curr[0] - pt[0];
+      const dy = curr[1] - pt[1];
+      const sqDist = dx * dx + dy * dy;
+      if (sqDist < minSqDist) {
+        minSqDist = sqDist;
+        bestIdx = i;
+      }
+    }
+
+    const chosen = remaining[bestIdx];
+    // O(1) remove: replace with last element and pop
+    const last = remaining.pop()!;
+    if (bestIdx < remaining.length) {
+      remaining[bestIdx] = last;
+    }
+
+    ordered.push(chosen);
+    curr = chosen.leadOutPoint || chosen.points[chosen.points.length - 1] || curr;
+  }
+
+  return { ordered, endHead: curr };
 }
 
 /**
  * Optimizes cut order on a sheet using:
  * 1. Strict Cut-Order Hierarchy (Inner reliefs & tabs BEFORE Outer perimeters)
- * 2. Greedy Nearest Neighbor with 2-Opt local search for Rapid Distance minimization
+ * 2. Greedy Nearest Neighbor for Rapid Distance minimization
  */
 export function optimizeSheetToolpath(
   rawContours: ToolpathContour[],
   sheetId: string,
-  cncSettings: CNCSettings
+  cncSettings?: CNCSettings
 ): SheetToolpath {
+  const safeCnc = cncSettings || DEFAULT_CNC_SETTINGS;
+
   if (rawContours.length === 0) {
     return {
       sheetId,
@@ -238,77 +320,38 @@ export function optimizeSheetToolpath(
     };
   }
 
-  // Calculate baseline unoptimized rapid distance (original sequence order)
-  let unoptimizedRapidDist = 0;
-  let currHead: Vec2 = [0, 0];
+  // Separate inner contours (must be cut first) from outer perimeters
+  const innerContours: ToolpathContour[] = [];
+  const outerContours: ToolpathContour[] = [];
+
   for (const c of rawContours) {
-    const startPt = c.leadInPoint || c.points[0];
-    const endPt = c.leadOutPoint || c.points[c.points.length - 1];
-    unoptimizedRapidDist += dist2D(currHead, startPt);
-    currHead = endPt;
+    if (c.isInner) {
+      innerContours.push(c);
+    } else {
+      outerContours.push(c);
+    }
   }
-  unoptimizedRapidDist += dist2D(currHead, [0, 0]); // Return home
 
-  // Group contours by panel to enforce hierarchy:
-  // For each panel: inner_feature and relief_tab MUST be cut before outer_perimeter
-  const remainingContours = [...rawContours];
-  const orderedContours: ToolpathContour[] = [];
+  // 1. Order inner features starting from origin [0, 0]
+  const innerResult = orderContourSubset(innerContours, [0, 0]);
 
-  currHead = [0, 0]; // Home position
+  // 2. Order outer perimeters starting from wherever inner cuts ended
+  const outerResult = orderContourSubset(outerContours, innerResult.endHead);
 
-  while (remainingContours.length > 0) {
-    // Determine which contours are currently "eligible" to cut:
-    // A contour is eligible if:
-    // - It is inner_feature or relief_tab
-    // - OR it is outer_perimeter AND all inner/relief contours for this panelId have already been cut!
-    const eligibleIndices: number[] = [];
-
-    for (let i = 0; i < remainingContours.length; i++) {
-      const candidate = remainingContours[i];
-      if (candidate.contourType === 'inner_feature' || candidate.contourType === 'relief_tab') {
-        eligibleIndices.push(i);
-      } else {
-        // outer_perimeter: check if any inner features remain for this panel
-        const hasUncutInner = remainingContours.some(
-          (other) =>
-            other.panelId === candidate.panelId &&
-            (other.contourType === 'inner_feature' || other.contourType === 'relief_tab')
-        );
-        if (!hasUncutInner) {
-          eligibleIndices.push(i);
-        }
-      }
-    }
-
-    // Among eligible, pick the one closest to currHead (Greedy Nearest Neighbor)
-    let bestIdxInRemaining = eligibleIndices[0];
-    let minRapid = Infinity;
-
-    for (const idx of eligibleIndices) {
-      const c = remainingContours[idx];
-      const startPt = c.leadInPoint || c.points[0];
-      const d = dist2D(currHead, startPt);
-      if (d < minRapid) {
-        minRapid = d;
-        bestIdxInRemaining = idx;
-      }
-    }
-
-    // Append best contour
-    const chosen = remainingContours.splice(bestIdxInRemaining, 1)[0];
-    chosen.cutOrder = orderedContours.length + 1;
-    orderedContours.push(chosen);
-    currHead = chosen.leadOutPoint || chosen.points[chosen.points.length - 1];
+  // Combine and assign sequential cut order
+  const orderedContours = [...innerResult.ordered, ...outerResult.ordered];
+  for (let i = 0; i < orderedContours.length; i++) {
+    orderedContours[i].cutOrder = i + 1;
   }
 
   // Calculate optimized rapid and cut distances
   let optimizedRapidDist = 0;
   let totalCutDist = 0;
-  currHead = [0, 0];
+  let currHead: Vec2 = [0, 0];
 
   for (const c of orderedContours) {
-    const startPt = c.leadInPoint || c.points[0];
-    const endPt = c.leadOutPoint || c.points[c.points.length - 1];
+    const startPt = c.leadInPoint || c.points[0] || [0, 0];
+    const endPt = c.leadOutPoint || c.points[c.points.length - 1] || startPt;
     optimizedRapidDist += dist2D(currHead, startPt);
     totalCutDist += c.contourLengthMm;
     currHead = endPt;
@@ -316,9 +359,9 @@ export function optimizeSheetToolpath(
   optimizedRapidDist += dist2D(currHead, [0, 0]); // Return home
 
   // Compute times
-  const cutSpeedMmSec = cncSettings.cuttingFeedrateMmMin / 60;
-  const rapidSpeedMmSec = cncSettings.rapidFeedrateMmMin / 60;
-  const pierceDelay = cncSettings.pierceDelaySec;
+  const cutSpeedMmSec = (safeCnc.cuttingFeedrateMmMin || 3000) / 60;
+  const rapidSpeedMmSec = (safeCnc.rapidFeedrateMmMin || 12000) / 60;
+  const pierceDelay = safeCnc.pierceDelaySec ?? 0.4;
 
   const totalCutTime = totalCutDist / cutSpeedMmSec;
   const totalRapidTime = optimizedRapidDist / rapidSpeedMmSec;
@@ -342,10 +385,12 @@ export function optimizeSheetToolpath(
  * Main entry point: Generates full multi-sheet optimized toolpath plan
  */
 export function generateToolpathPlan(
-  sheets: NestedSheet[],
-  settings: ManufacturingSettings,
-  cncSettings: CNCSettings = DEFAULT_CNC_SETTINGS
+  sheets: NestingSheet[],
+  settings?: ManufacturingSettings,
+  cncSettings?: CNCSettings
 ): ToolpathPlan {
+  const safeSettings = settings || DEFAULT_MANUFACTURING_SETTINGS;
+  const safeCnc = cncSettings || DEFAULT_CNC_SETTINGS;
   const sheetToolpaths: SheetToolpath[] = [];
   let totalCutMm = 0;
   let totalRapidMm = 0;
@@ -356,8 +401,9 @@ export function generateToolpathPlan(
 
   for (const sheet of sheets) {
     const rawContours: ToolpathContour[] = [];
-    for (const placed of sheet.placedPanels) {
-      const extracted = extractPanelContours(placed, sheet.id, settings, cncSettings);
+    const sheetId = `SHEET-${sheet.sheetIndex + 1}`;
+    for (const placed of sheet.placedParts) {
+      const extracted = extractPanelContours(placed, sheetId, safeSettings, safeCnc);
       rawContours.push(...extracted);
     }
 
@@ -365,35 +411,36 @@ export function generateToolpathPlan(
     let sheetUnoptRapid = 0;
     let tempHead: Vec2 = [0, 0];
     for (const c of rawContours) {
-      const p = c.leadInPoint || c.points[0];
+      const p = c.leadInPoint || c.points[0] || [0, 0];
       sheetUnoptRapid += dist2D(tempHead, p);
-      tempHead = c.leadOutPoint || c.points[c.points.length - 1];
+      tempHead = c.leadOutPoint || c.points[c.points.length - 1] || p;
     }
     sheetUnoptRapid += dist2D(tempHead, [0, 0]);
+
+    const optimizedSheet = optimizeSheetToolpath(rawContours, sheetId, safeCnc);
+    sheetToolpaths.push(optimizedSheet);
+
+    totalCutMm += optimizedSheet.sheetCutDistanceMm;
+    totalRapidMm += optimizedSheet.sheetRapidDistanceMm;
     unoptimizedRapidMm += sheetUnoptRapid;
-
-    const optSheet = optimizeSheetToolpath(rawContours, sheet.id, cncSettings);
-    sheetToolpaths.push(optSheet);
-
-    totalCutMm += optSheet.sheetCutDistanceMm;
-    totalRapidMm += optSheet.sheetRapidDistanceMm;
-    totalPierces += optSheet.sheetPierceCount;
-    totalCutTimeSec += optSheet.sheetEstimatedCutTimeSec;
-    totalRapidTimeSec += optSheet.sheetEstimatedRapidTimeSec;
+    totalPierces += optimizedSheet.sheetPierceCount;
+    totalCutTimeSec += optimizedSheet.sheetEstimatedCutTimeSec;
+    totalRapidTimeSec += optimizedSheet.sheetEstimatedRapidTimeSec;
   }
 
-  const rapidDistanceSavedMm = Math.max(0, Math.round((unoptimizedRapidMm - totalRapidMm) * 10) / 10);
-  const totalCycleTimeSec = Math.round((totalCutTimeSec + totalRapidTimeSec + totalPierces * cncSettings.pierceDelaySec) * 10) / 10;
+  const rapidSavedMm = Math.max(0, unoptimizedRapidMm - totalRapidMm);
+  const totalEstimatedCycleTimeSec =
+    totalCutTimeSec + totalRapidTimeSec + totalPierces * (safeCnc.pierceDelaySec ?? 0.4);
 
   return {
     sheets: sheetToolpaths,
     totalCutDistanceMm: Math.round(totalCutMm * 10) / 10,
     totalRapidDistanceMm: Math.round(totalRapidMm * 10) / 10,
     unoptimizedRapidDistanceMm: Math.round(unoptimizedRapidMm * 10) / 10,
-    rapidDistanceSavedMm,
+    rapidDistanceSavedMm: Math.round(rapidSavedMm * 10) / 10,
     totalPierceCount: totalPierces,
     totalEstimatedCutTimeSec: Math.round(totalCutTimeSec * 10) / 10,
     totalEstimatedRapidTimeSec: Math.round(totalRapidTimeSec * 10) / 10,
-    totalEstimatedCycleTimeSec: totalCycleTimeSec,
+    totalEstimatedCycleTimeSec: Math.round(totalEstimatedCycleTimeSec * 10) / 10,
   };
 }

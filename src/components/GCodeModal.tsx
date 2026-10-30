@@ -23,6 +23,7 @@ import {
   ManufacturingSettings,
   CNCSettings,
   DEFAULT_CNC_SETTINGS,
+  DEFAULT_MANUFACTURING_SETTINGS,
 } from '../core/manufacturing/types';
 import { generateToolpathPlan } from '../core/manufacturing/toolpath';
 import { generateProjectGCode, generateSheetGCode } from '../core/manufacturing/gcode';
@@ -31,28 +32,36 @@ interface GCodeModalProps {
   isOpen: boolean;
   onClose: () => void;
   nesting: NestingResult | null;
-  mfgSettings: ManufacturingSettings;
-  cncSettings: CNCSettings;
-  onUpdateCncSettings: (settings: CNCSettings) => void;
+  settings?: ManufacturingSettings;
+  mfgSettings?: ManufacturingSettings;
+  cncSettings?: CNCSettings;
+  onUpdateCncSettings?: (settings: CNCSettings) => void;
+  onChangeCncSettings?: (settings: CNCSettings) => void;
 }
 
 export const GCodeModal: React.FC<GCodeModalProps> = ({
   isOpen,
   onClose,
   nesting,
+  settings,
   mfgSettings,
   cncSettings,
   onUpdateCncSettings,
+  onChangeCncSettings,
 }) => {
   const [selectedSheetIdx, setSelectedSheetIdx] = useState<number>(0);
   const [copied, setCopied] = useState<boolean>(false);
   const [showSettings, setShowSettings] = useState<boolean>(false);
 
+  const effectiveSettings = settings || mfgSettings || DEFAULT_MANUFACTURING_SETTINGS;
+  const effectiveCncSettings = cncSettings || DEFAULT_CNC_SETTINGS;
+  const handleUpdateSettings = onUpdateCncSettings || onChangeCncSettings || (() => {});
+
   // Compute toolpath plan and G-Code
   const toolpathPlan = useMemo(() => {
     if (!nesting || nesting.sheets.length === 0) return null;
-    return generateToolpathPlan(nesting.sheets, mfgSettings, cncSettings);
-  }, [nesting, mfgSettings, cncSettings]);
+    return generateToolpathPlan(nesting.sheets, effectiveSettings, effectiveCncSettings);
+  }, [nesting, effectiveSettings, effectiveCncSettings]);
 
   const activeGCode = useMemo(() => {
     if (!toolpathPlan || toolpathPlan.sheets.length === 0) return '';
@@ -129,9 +138,9 @@ export const GCodeModal: React.FC<GCodeModalProps> = ({
               <label className="text-slate-400 font-medium block mb-1">قدرة الليزر (واط):</label>
               <input
                 type="number"
-                value={cncSettings.laserPowerWatt}
+                value={effectiveCncSettings.laserPowerWatt}
                 onChange={(e) =>
-                  onUpdateCncSettings({ ...cncSettings, laserPowerWatt: Number(e.target.value) })
+                  handleUpdateSettings({ ...effectiveCncSettings, laserPowerWatt: Number(e.target.value) })
                 }
                 className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-white font-mono"
               />
@@ -140,10 +149,10 @@ export const GCodeModal: React.FC<GCodeModalProps> = ({
               <label className="text-slate-400 font-medium block mb-1">سرعة القطع (mm/min):</label>
               <input
                 type="number"
-                value={cncSettings.cuttingFeedrateMmMin}
+                value={effectiveCncSettings.cuttingFeedrateMmMin}
                 onChange={(e) =>
-                  onUpdateCncSettings({
-                    ...cncSettings,
+                  handleUpdateSettings({
+                    ...effectiveCncSettings,
                     cuttingFeedrateMmMin: Number(e.target.value),
                   })
                 }
@@ -154,10 +163,10 @@ export const GCodeModal: React.FC<GCodeModalProps> = ({
               <label className="text-slate-400 font-medium block mb-1">سرعة الحركة السريعة G00:</label>
               <input
                 type="number"
-                value={cncSettings.rapidFeedrateMmMin}
+                value={effectiveCncSettings.rapidFeedrateMmMin}
                 onChange={(e) =>
-                  onUpdateCncSettings({
-                    ...cncSettings,
+                  handleUpdateSettings({
+                    ...effectiveCncSettings,
                     rapidFeedrateMmMin: Number(e.target.value),
                   })
                 }
@@ -169,10 +178,10 @@ export const GCodeModal: React.FC<GCodeModalProps> = ({
               <input
                 type="number"
                 step="0.05"
-                value={cncSettings.pierceDelaySec}
+                value={effectiveCncSettings.pierceDelaySec}
                 onChange={(e) =>
-                  onUpdateCncSettings({
-                    ...cncSettings,
+                  handleUpdateSettings({
+                    ...effectiveCncSettings,
                     pierceDelaySec: Number(e.target.value),
                   })
                 }
@@ -182,10 +191,10 @@ export const GCodeModal: React.FC<GCodeModalProps> = ({
             <div>
               <label className="text-slate-400 font-medium block mb-1">غاز المساعدة (Assist Gas):</label>
               <select
-                value={cncSettings.assistGas}
+                value={effectiveCncSettings.assistGas}
                 onChange={(e) =>
-                  onUpdateCncSettings({
-                    ...cncSettings,
+                  handleUpdateSettings({
+                    ...effectiveCncSettings,
                     assistGas: e.target.value as any,
                   })
                 }
@@ -200,10 +209,10 @@ export const GCodeModal: React.FC<GCodeModalProps> = ({
               <label className="text-slate-400 font-medium block mb-1">طول مدخل القطع Lead-in (mm):</label>
               <input
                 type="number"
-                value={cncSettings.leadInLengthMm}
+                value={effectiveCncSettings.leadInLengthMm}
                 onChange={(e) =>
-                  onUpdateCncSettings({
-                    ...cncSettings,
+                  handleUpdateSettings({
+                    ...effectiveCncSettings,
                     leadInLengthMm: Number(e.target.value),
                   })
                 }
@@ -214,9 +223,9 @@ export const GCodeModal: React.FC<GCodeModalProps> = ({
               <label className="text-slate-400 font-medium block mb-1">ارتفاع الأمان Safe Z (mm):</label>
               <input
                 type="number"
-                value={cncSettings.safeZMm}
+                value={effectiveCncSettings.safeZMm}
                 onChange={(e) =>
-                  onUpdateCncSettings({ ...cncSettings, safeZMm: Number(e.target.value) })
+                  handleUpdateSettings({ ...effectiveCncSettings, safeZMm: Number(e.target.value) })
                 }
                 className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-white font-mono"
               />
@@ -224,10 +233,10 @@ export const GCodeModal: React.FC<GCodeModalProps> = ({
             <div>
               <label className="text-slate-400 font-medium block mb-1">تعويض شق القطع (Kerf Mode):</label>
               <select
-                value={cncSettings.kerfOffsetMode}
+                value={effectiveCncSettings.kerfOffsetMode}
                 onChange={(e) =>
-                  onUpdateCncSettings({
-                    ...cncSettings,
+                  handleUpdateSettings({
+                    ...effectiveCncSettings,
                     kerfOffsetMode: e.target.value as any,
                   })
                 }

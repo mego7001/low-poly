@@ -54,8 +54,8 @@ export const AcceptanceTestModal: React.FC<AcceptanceTestModalProps> = ({
         <div className="px-6 py-4 bg-slate-50 border-b border-slate-100 flex flex-wrap items-center justify-between gap-4">
           <div>
             <p className="text-xs text-slate-600">
-              تتحقق هذه الاختبارات من كافة بنود العقد الهندسي (Section 101)، بما يشمل استعادة الأسطح
-              الكبيرة، حتمية الترتيب (Shuffle Invariance)، كتم خطوط التثليث، ونقاء ملفات DXF.
+              تتحقق هذه الاختبارات من كافة بنود العقد الهندسي والتصنيعي (المراحل ١ إلى ٦)، بما يشمل استعادة الأسطح
+              الكبيرة، حتمية الترتيب، كتم التثليث، نقاء DXF، تسلسل قطع CNC الهرمي، توليد كود ISO 6983 G-Code، ومحاكاة التوأم الرقمي الحركية.
             </p>
             {suiteSummary && (
               <div className="flex items-center gap-4 mt-2 text-xs font-mono">

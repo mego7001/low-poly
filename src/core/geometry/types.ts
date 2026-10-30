@@ -80,6 +80,9 @@ export interface GeometryV2Cache {
 export interface GeometryV2Params {
   maxDistanceTolerance: number;
   maxNormalDeg: number;
+  mergeDistanceTolerance?: number;
+  mergeNormalDeg?: number;
+  enableSurfaceMerge?: boolean;
   checkpointStart: number;
   maxCandidateQueueSize: number;
   enableFastGate: boolean;
@@ -94,6 +97,9 @@ export interface GeometryV2Params {
 export const DEFAULT_GEOMETRY_V2_PARAMS: GeometryV2Params = {
   maxDistanceTolerance: 0.001,
   maxNormalDeg: 6,
+  mergeDistanceTolerance: 0.05,
+  mergeNormalDeg: 6,
+  enableSurfaceMerge: true,
   checkpointStart: 4,
   maxCandidateQueueSize: 100000,
   enableFastGate: true,

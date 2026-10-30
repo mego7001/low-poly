@@ -20,6 +20,7 @@ import {
   sub,
   angleBetweenNormalsDeg,
   computePCAForPoints,
+  computeAreaWeightedPCAForFaces,
   calculateBoundingBox,
   nearlyLE,
 } from './math';
@@ -270,39 +271,20 @@ export function createRegionSnapshot(
 }
 
 /**
- * Recomputes PCA plane for all faces in a region (Section 14, 31-33).
- * Accurately aligns the computed plane normal with the region's constituent face normals.
+ * Recomputes area-weighted PCA plane for all faces in a region (Section 14, 31-33).
+ * Integrates continuous second moments over triangle surfaces, invariant to mesh density.
  */
 export function computeRegionPCAPlane(
   regionFaceIds: Iterable<number>,
   cache: GeometryV2Cache
 ): Plane {
-  const points: Vec3[] = [];
-  let avgNx = 0;
-  let avgNy = 0;
-  let avgNz = 0;
-  let count = 0;
-
+  const faces: FaceGeometry[] = [];
   for (const fId of regionFaceIds) {
     const face = cache.faces.get(fId);
     if (face) {
-      points.push(face.positions[0], face.positions[1], face.positions[2]);
-      avgNx += face.normal[0];
-      avgNy += face.normal[1];
-      avgNz += face.normal[2];
-      count++;
+      faces.push(face);
     }
   }
 
-  const plane = computePCAForPoints(points);
-
-  // Orient the PCA normal to agree with the constituent faces' normal direction
-  if (count > 0) {
-    const dotProduct = plane.normal[0] * avgNx + plane.normal[1] * avgNy + plane.normal[2] * avgNz;
-    if (dotProduct < 0) {
-      plane.normal = [-plane.normal[0], -plane.normal[1], -plane.normal[2]];
-    }
-  }
-
-  return plane;
+  return computeAreaWeightedPCAForFaces(faces);
 }

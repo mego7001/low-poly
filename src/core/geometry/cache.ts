@@ -147,8 +147,8 @@ export function buildGeometryV2Cache(mesh: MeshInput): GeometryV2Cache {
     });
   }
 
-  // 3. Deterministic stable face ordering (Section 7, 19)
-  // Non-degenerate faces, sorted by area desc, then stable key asc
+  // 3. Deterministic stable face ordering (Section 7, 19, 5.1)
+  // Non-degenerate faces sorted strictly by stableKey ASC (invariant to mesh array ordering or area bias)
   const validFaceIds = Array.from(facesMap.keys()).filter(
     (id) => !degenerateFaceIds.has(id)
   );
@@ -156,11 +156,6 @@ export function buildGeometryV2Cache(mesh: MeshInput): GeometryV2Cache {
   validFaceIds.sort((a, b) => {
     const fA = facesMap.get(a)!;
     const fB = facesMap.get(b)!;
-    // Round area to 4 decimals for stable tiering
-    const areaDiff = Math.round(fB.area * 10000) - Math.round(fA.area * 10000);
-    if (areaDiff !== 0) {
-      return areaDiff;
-    }
     return fA.stableKey.localeCompare(fB.stableKey);
   });
 

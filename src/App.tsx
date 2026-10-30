@@ -20,6 +20,8 @@ import {
   BOMItem,
   AssemblyMap,
   ManufacturabilityScore,
+  CNCSettings,
+  DEFAULT_CNC_SETTINGS,
 } from './core/manufacturing/types';
 import { parseMeshFile, validateMeshTopology, ImportMetadata } from './core/parsers/meshParser';
 import { reconstructGeometryV2 } from './core/geometry/reconstructionV2';
@@ -34,6 +36,7 @@ import {
   createTriangulatedPentagonFixture,
   createTriangulatedHexagonFixture,
   createSoccerBallFixture,
+  createLowPolyCamelFixture,
   createDenseFlatPlaneFixture,
   createLowPolyFoxFixture,
   createTry1BenchmarkFixture,
@@ -48,6 +51,8 @@ import { AssemblyMapView } from './components/AssemblyMapView';
 import { SettingsModal } from './components/SettingsModal';
 import { ExportModal } from './components/ExportModal';
 import { AcceptanceTestModal } from './components/AcceptanceTestModal';
+import { KinematicsViewport } from './components/KinematicsViewport';
+import { GCodeModal } from './components/GCodeModal';
 
 // Icons
 import {
@@ -65,6 +70,9 @@ import {
   CheckCircle2,
   Cpu,
   ChevronRight,
+  Zap,
+  Navigation,
+  AlertOctagon,
 } from 'lucide-react';
 
 export default function App() {
@@ -80,11 +88,15 @@ export default function App() {
   const [manufacturabilityScore, setManufacturabilityScore] = useState<ManufacturabilityScore | null>(null);
 
   // Configuration Parameters
-  const [mfgSettings, setMfgSettings] = useState<ManufacturingSettings>(DEFAULT_MANUFACTURING_SETTINGS);
+  const [mfgSettings, setMfgSettings] = useState<ManufacturingSettings>({
+    ...DEFAULT_MANUFACTURING_SETTINGS,
+    nestingStrategy: 'components',
+  });
   const [geoParams, setGeoParams] = useState<GeometryV2Params>(DEFAULT_GEOMETRY_V2_PARAMS);
+  const [cncSettings, setCncSettings] = useState<CNCSettings>(DEFAULT_CNC_SETTINGS);
 
   // Navigation & Viewport State
-  const [activeTab, setActiveTab] = useState<'3d' | '2d' | 'bom' | 'assembly' | 'diagnostics'>('3d');
+  const [activeTab, setActiveTab] = useState<'3d' | '2d' | 'kinematics' | 'bom' | 'assembly' | 'diagnostics'>('3d');
   const [viewMode3D, setViewMode3D] = useState<'original' | 'largeFaces' | 'manufacturing'>('largeFaces');
   const [showInternalTriangulation, setShowInternalTriangulation] = useState<boolean>(false);
   const [selectedPanelId, setSelectedPanelId] = useState<string | null>(null);
@@ -93,11 +105,13 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isExportOpen, setIsExportOpen] = useState<boolean>(false);
   const [isAcceptanceTestsOpen, setIsAcceptanceTestsOpen] = useState<boolean>(false);
+  const [isGCodeOpen, setIsGCodeOpen] = useState<boolean>(false);
 
   // Pipeline Status & Progress (Section 57, 62)
   const [isPipelineRunning, setIsPipelineRunning] = useState<boolean>(false);
   const [pipelineStage, setPipelineStage] = useState<string>('جاهز للعمل');
   const [pipelineProgress, setPipelineProgress] = useState<number>(0);
+  const [pipelineError, setPipelineError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -108,6 +122,7 @@ export default function App() {
 
   // Pre-configured models loader
   const loadModel = (modelKey: string) => {
+    setPipelineError(null);
     let newMesh: MeshInput;
     let fileName = '';
 
@@ -127,6 +142,10 @@ export default function App() {
       case 'soccer':
         newMesh = createSoccerBallFixture();
         fileName = 'soccer_ball_fixture.stl';
+        break;
+      case 'camel':
+        newMesh = createLowPolyCamelFixture();
+        fileName = 'aume_camel_sculpture_15parts.obj';
         break;
       case 'fox':
         newMesh = createLowPolyFoxFixture();
@@ -168,60 +187,69 @@ export default function App() {
     currentMfgSettings: ManufacturingSettings
   ) => {
     setIsPipelineRunning(true);
+    setPipelineError(null);
     setPipelineProgress(10);
     setPipelineStage('١. فحص وتنظيف الشبكة الهندسية (Mesh Validation)');
 
-    await new Promise((r) => setTimeout(r, 60));
+    await new Promise((r) => setTimeout(r, 40));
 
-    // Step 2 & 3: Large Face Reconstruction V2 (PCA + Lazy Queue + Exact Gate)
-    setPipelineProgress(35);
-    setPipelineStage('٢. إعادة بناء الأسطح الكبيرة V2 وكتم خطوط التثليث (PCA Reconstruction)');
+    try {
+      // Step 2 & 3: Large Face Reconstruction V2 (PCA + Lazy Queue + Exact Gate)
+      setPipelineProgress(30);
+      setPipelineStage('٢. إعادة بناء الأسطح الكبيرة V2 وكتم خطوط التثليث (PCA Reconstruction)');
+      await new Promise((r) => setTimeout(r, 20));
 
-    const recon = reconstructGeometryV2(targetMesh, currentGeoParams);
-    setReconstruction(recon);
+      const recon = reconstructGeometryV2(targetMesh, currentGeoParams);
+      setReconstruction(recon);
 
-    await new Promise((r) => setTimeout(r, 60));
+      // Step 4: Smart Panels & Local UV Projection
+      setPipelineProgress(50);
+      setPipelineStage('٣. تصنيف الألواح الذكية P-XXXXXXXX وتحديد معالم الحدود (Smart Panels)');
+      await new Promise((r) => setTimeout(r, 20));
 
-    // Step 4: Smart Panels & Local UV Projection
-    setPipelineProgress(55);
-    setPipelineStage('٣. تصنيف الألواح الذكية P-XXXXXXXX وتحديد معالم الحدود (Smart Panels)');
+      const smartPanels = buildSmartPanels(recon.regions, targetMesh);
+      setPanels(smartPanels);
 
-    const smartPanels = buildSmartPanels(recon.regions, targetMesh);
-    setPanels(smartPanels);
+      // Step 5: Incremental Unfold & Bend/Seam Analysis
+      setPipelineProgress(70);
+      setPipelineStage('٤. الفرد التصنيعي واكتشاف خطوط الثني واللحام (Incremental Unfold)');
+      await new Promise((r) => setTimeout(r, 20));
 
-    await new Promise((r) => setTimeout(r, 60));
+      const unfoldRes = performIncrementalUnfold(smartPanels, recon, currentMfgSettings);
+      setUnfold(unfoldRes);
 
-    // Step 5: Incremental Unfold & Bend/Seam Analysis
-    setPipelineProgress(75);
-    setPipelineStage('٤. الفرد التصنيعي واكتشاف خطوط الثني واللحام (Incremental Unfold)');
+      // Step 6: Multi-Sheet Polygon Nesting
+      setPipelineProgress(85);
+      setPipelineStage('٥. توزيع الألواح الخام وفحص التصادم الحقيقي (Polygon Nesting)');
+      await new Promise((r) => setTimeout(r, 20));
 
-    const unfoldRes = performIncrementalUnfold(smartPanels, recon, currentMfgSettings);
-    setUnfold(unfoldRes);
+      const nestingRes = performPolygonNesting(unfoldRes, currentMfgSettings);
+      setNesting(nestingRes);
 
-    await new Promise((r) => setTimeout(r, 60));
+      // Step 7: BOM, Assembly Map, & Manufacturability Score
+      setPipelineProgress(95);
+      setPipelineStage('٦. إنشاء جدول BOM ودليل التجميع وتقييم قابلية التصنيع');
+      await new Promise((r) => setTimeout(r, 20));
 
-    // Step 6: Multi-Sheet Polygon Nesting
-    setPipelineProgress(90);
-    setPipelineStage('٥. توزيع الألواح الخام وفحص التصادم الحقيقي (Polygon Nesting)');
+      const bomList = generateBOM(smartPanels, nestingRes, currentMfgSettings, unfoldRes.allBends);
+      setBom(bomList);
 
-    const nestingRes = performPolygonNesting(unfoldRes, currentMfgSettings);
-    setNesting(nestingRes);
+      const assemblyMap = buildAssemblyMap(smartPanels, unfoldRes.allBends, recon, unfoldRes.allSeams);
+      setAssembly(assemblyMap);
 
-    // Step 7: BOM, Assembly Map, & Manufacturability Score
-    setPipelineProgress(100);
-    setPipelineStage('٦. إنشاء جدول BOM ودليل التجميع وتقييم قابلية التصنيع');
+      const score = evaluateManufacturabilityScore(smartPanels, unfoldRes, nestingRes);
+      setManufacturabilityScore(score);
 
-    const bomList = generateBOM(smartPanels, nestingRes, currentMfgSettings, unfoldRes.allBends);
-    setBom(bomList);
-
-    const assemblyMap = buildAssemblyMap(smartPanels, unfoldRes.allBends, recon, unfoldRes.allSeams);
-    setAssembly(assemblyMap);
-
-    const score = evaluateManufacturabilityScore(smartPanels, unfoldRes, nestingRes);
-    setManufacturabilityScore(score);
-
-    setIsPipelineRunning(false);
-    setPipelineStage('اكتملت المعالجة بنجاح (100%)');
+      setPipelineProgress(100);
+      setIsPipelineRunning(false);
+      setPipelineStage('اكتملت المعالجة بنجاح (100%)');
+    } catch (err: any) {
+      console.error('Pipeline execution error:', err);
+      setIsPipelineRunning(false);
+      const errMsg = err?.message || 'تعذر استكمال المعالجة الهندسية';
+      setPipelineError(errMsg);
+      setPipelineStage(`توقفت المعالجة: ${errMsg}`);
+    }
   };
 
   // Handle Custom File Upload (STL / OBJ)
@@ -252,6 +280,23 @@ export default function App() {
     };
 
     reader.readAsArrayBuffer(file);
+  };
+
+  // Immediate reactive settings handler
+  const handleMfgSettingsChange = (newSettings: ManufacturingSettings) => {
+    setMfgSettings(newSettings);
+    if (unfold && panels.length > 0 && reconstruction) {
+      try {
+        const nestingRes = performPolygonNesting(unfold, newSettings);
+        setNesting(nestingRes);
+        const bomList = generateBOM(panels, nestingRes, newSettings, unfold.allBends);
+        setBom(bomList);
+        const score = evaluateManufacturabilityScore(panels, unfold, nestingRes);
+        setManufacturabilityScore(score);
+      } catch (err) {
+        console.error('Instant nesting update error:', err);
+      }
+    }
   };
 
   return (
@@ -289,6 +334,7 @@ export default function App() {
               className="text-xs bg-slate-50 border border-slate-200 text-slate-700 px-3 py-1.5 rounded-lg focus:outline-none focus:border-blue-500 font-medium"
             >
               <option value="soccer">كرة القدم (Soccer Ball Fixture - 116 Δ)</option>
+              <option value="camel">تمثال الجمل الهندسي (AUME Camel Sculpture - 15 قطاعاً)</option>
               <option value="cube">المكعب القياسي (Cube Fixture - 12 Δ)</option>
               <option value="pentagon">خماسي مسطح (Pentagon - 5 Δ → 1 Region)</option>
               <option value="hexagon">سداسي مسطح (Hexagon - 6 Δ → 1 Region)</option>
@@ -337,6 +383,16 @@ export default function App() {
               <span className="hidden md:inline">مصفوفة الاختبارات</span>
             </button>
 
+            {/* CNC Laser G-Code Modal */}
+            <button
+              id="btn-open-gcode"
+              onClick={() => setIsGCodeOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-purple-800 bg-purple-50 hover:bg-purple-100 border border-purple-200/80 rounded-lg transition-colors"
+            >
+              <Zap className="w-4 h-4 text-purple-600" />
+              <span className="hidden md:inline">كود CNC ليزر (G-Code)</span>
+            </button>
+
             {/* Settings Modal Toggle */}
             <button
               id="btn-open-settings"
@@ -367,6 +423,22 @@ export default function App() {
               <span className="font-medium">{pipelineStage}</span>
             </div>
             <span className="font-mono font-bold">{pipelineProgress}%</span>
+          </div>
+        )}
+
+        {/* Pipeline Error Banner */}
+        {pipelineError && !isPipelineRunning && (
+          <div className="bg-rose-50 border-t border-rose-200 px-4 sm:px-6 py-2 flex items-center justify-between text-xs text-rose-900">
+            <div className="flex items-center gap-2">
+              <AlertOctagon className="w-4 h-4 text-rose-600 shrink-0" />
+              <span className="font-medium">{pipelineError}</span>
+            </div>
+            <button
+              onClick={() => mesh && runAUMEPipeline(mesh, geoParams, mfgSettings)}
+              className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white font-semibold rounded text-[11px] transition-colors"
+            >
+              إعادة المحاولة
+            </button>
           </div>
         )}
       </header>
@@ -400,6 +472,19 @@ export default function App() {
             >
               <FileCode className="w-4 h-4" />
               <span>الفرد وتوزيع الألواح (2D Nesting)</span>
+            </button>
+
+            <button
+              id="tab-kinematics"
+              onClick={() => setActiveTab('kinematics')}
+              className={`flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded-lg transition-colors ${
+                activeTab === 'kinematics'
+                  ? 'bg-slate-900 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              <Navigation className="w-4 h-4 text-purple-400" />
+              <span>المحاكاة الحركية (Digital Twin)</span>
             </button>
 
             <button
@@ -493,6 +578,23 @@ export default function App() {
               panels={panels}
               selectedPanelId={selectedPanelId}
               onSelectPanel={setSelectedPanelId}
+              mfgSettings={mfgSettings}
+              onChangeMfgSettings={handleMfgSettingsChange}
+            />
+          )}
+
+          {activeTab === 'kinematics' && (
+            <KinematicsViewport
+              panels={panels}
+              unfold={unfold}
+              assembly={assembly}
+              reconstruction={reconstruction}
+              nesting={nesting}
+              settings={mfgSettings}
+              mfgSettings={mfgSettings}
+              cncSettings={cncSettings}
+              onOpenGCode={() => setIsGCodeOpen(true)}
+              onOpenGCodeModal={() => setIsGCodeOpen(true)}
             />
           )}
 
@@ -524,6 +626,7 @@ export default function App() {
               settings={mfgSettings}
               assembly={assembly}
               bom={bom}
+              cncSettings={cncSettings}
             />
           )}
         </div>
@@ -539,11 +642,14 @@ export default function App() {
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
         mfgSettings={mfgSettings}
-        onChangeMfgSettings={setMfgSettings}
+        onChangeMfgSettings={handleMfgSettingsChange}
         geoParams={geoParams}
         onChangeGeoParams={setGeoParams}
         onResetDefaults={() => {
-          setMfgSettings(DEFAULT_MANUFACTURING_SETTINGS);
+          handleMfgSettingsChange({
+            ...DEFAULT_MANUFACTURING_SETTINGS,
+            nestingStrategy: 'components',
+          });
           setGeoParams(DEFAULT_GEOMETRY_V2_PARAMS);
         }}
       />
@@ -552,6 +658,18 @@ export default function App() {
       <AcceptanceTestModal
         isOpen={isAcceptanceTestsOpen}
         onClose={() => setIsAcceptanceTestsOpen(false)}
+      />
+
+      {/* CNC G-Code Inspector & Machine Parameters Modal */}
+      <GCodeModal
+        isOpen={isGCodeOpen}
+        onClose={() => setIsGCodeOpen(false)}
+        nesting={nesting}
+        settings={mfgSettings}
+        mfgSettings={mfgSettings}
+        cncSettings={cncSettings}
+        onChangeCncSettings={setCncSettings}
+        onUpdateCncSettings={setCncSettings}
       />
 
       {/* Export Package Modal */}
@@ -566,6 +684,7 @@ export default function App() {
         reconstruction={reconstruction}
         assembly={assembly}
         manufacturabilityScore={manufacturabilityScore}
+        cncSettings={cncSettings}
       />
     </div>
   );

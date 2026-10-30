@@ -79,6 +79,36 @@ export function evaluateManufacturabilityScore(
     });
   }
 
+  // 6. Excessive Panel Fragmentation & Singleton Explosion (Section 17, 18)
+  const singletonPanels = panels.filter((p) => p.faceCount === 1);
+  if (panels.length > 40 || singletonPanels.length > 15) {
+    const fragPenalty = Math.min(
+      20,
+      Math.max(0, Math.floor((panels.length - 30) * 0.4) + Math.floor(singletonPanels.length * 0.5))
+    );
+    if (fragPenalty > 0) {
+      score -= fragPenalty;
+      deductions.push({
+        reason: 'Panel Fragmentation & Singletons',
+        points: fragPenalty,
+        detail: `High panel count (${panels.length} panels, ${singletonPanels.length} singletons) increases assembly time and seam count.`,
+      });
+    }
+  }
+
+  // 7. Low Material Utilization Penalty (Section 17)
+  if (nesting.overallUtilization < 45 && nesting.sheets.length > 0) {
+    const utilPenalty = Math.min(15, Math.round((45 - nesting.overallUtilization) * 0.4));
+    if (utilPenalty > 0) {
+      score -= utilPenalty;
+      deductions.push({
+        reason: 'Low Sheet Nesting Utilization',
+        points: utilPenalty,
+        detail: `Material nesting utilization is only ${nesting.overallUtilization.toFixed(1)}%, resulting in high raw stock scrap.`,
+      });
+    }
+  }
+
   const finalScore = Math.max(0, Math.min(100, Math.round(score)));
 
   let rating: ManufacturabilityScore['rating'] = 'EXCELLENT';
@@ -86,12 +116,23 @@ export function evaluateManufacturabilityScore(
   else if (finalScore < 80) rating = 'NEEDS_REVIEW';
   else if (finalScore < 90) rating = 'GOOD';
 
+  // Real Weld Efficiency Metric (Section 17, 18):
+  // Measures the ratio of folded joints (zero-weld) vs total joints requiring manual welding
+  const totalBendLength = unfold.allBends.reduce((acc, b) => acc + b.length, 0);
+  const totalSeamLength = (unfold.allSeams || []).reduce((acc, s) => acc + s.length, 0);
+  const totalJointLength = totalBendLength + totalSeamLength;
+
+  const realWeldEfficiency =
+    totalJointLength > 0
+      ? Math.max(0, Math.min(100, Math.round((totalBendLength / totalJointLength) * 100)))
+      : 100;
+
   return {
     score: finalScore,
     rating,
     deductions,
-    weldEfficiency: Math.min(100, Math.round(85 + (100 - panels.length) * 0.1)),
-    nestingEfficiency: Math.round(nesting.overallUtilization),
+    weldEfficiency: realWeldEfficiency,
+    nestingEfficiency: Math.max(0, Math.min(100, Math.round(nesting.overallUtilization))),
     bendSafety: Math.round(
       ((unfold.allBends.length - extremeBends.length) /
         Math.max(1, unfold.allBends.length)) *

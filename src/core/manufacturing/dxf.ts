@@ -127,19 +127,34 @@ export function generateDXF(
       // Strictly outer contour - NEVER internal triangulation!
       drawPolyline(shiftedPolygon, 'CUT', add, true);
 
-      // 2. Draw bend lines (on BEND layer)
+      // 2. Draw hinge cut dashes (on CUT layer — these are REAL laser cuts)
       for (const bl of part.bendLines) {
-        drawLine(
-          [bl.start[0] + sheetOffsetX, bl.start[1]],
-          [bl.end[0] + sheetOffsetX, bl.end[1]],
-          'BEND',
-          add
-        );
+        if (bl.hingeCutPattern && bl.hingeCutPattern.dashes.length > 0) {
+          // Real laser cut dash segments on CUT layer
+          for (const dash of bl.hingeCutPattern.dashes) {
+            drawLine(
+              [dash.start[0] + sheetOffsetX, dash.start[1]],
+              [dash.end[0] + sheetOffsetX, dash.end[1]],
+              'CUT',
+              add
+            );
+          }
+        } else {
+          // Fallback: draw continuous bend line on BEND layer if pattern missing
+          drawLine(
+            [bl.start[0] + sheetOffsetX, bl.start[1]],
+            [bl.end[0] + sheetOffsetX, bl.end[1]],
+            'BEND',
+            add
+          );
+        }
       }
 
       // 3. Draw Part & Panel ID Text (on ID layer)
       const center = computePolygonCenter(shiftedPolygon);
-      addText(part.panelId, center, textHeight, 'ID', add);
+      const minDimension = Math.min(part.bounds.width, part.bounds.height);
+      const effectiveTextHeight = Math.max(1.5, Math.min(textHeight, minDimension * 0.25));
+      addText(part.panelId, center, effectiveTextHeight, 'ID', add);
 
       // 4. Draw Assembly Tabs (if attached to part)
       if (part.tabs && part.tabs.length > 0) {

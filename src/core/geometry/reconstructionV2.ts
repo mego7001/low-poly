@@ -29,6 +29,7 @@ import {
 import { extractRegionBoundary } from './boundaries';
 import { buildRegionAdjacency } from './adjacency';
 import { makeStableRegionKey, mergeBoundingBoxes } from './math';
+import { performSurfaceMerge, SurfaceMergeDiagnostic } from './surfaceMerge';
 
 export function reconstructGeometryV2(
   mesh: MeshInput,
@@ -139,7 +140,7 @@ export function reconstructGeometryV2(
         if (!unassignedFaces.has(nbId)) continue;
 
         const candidateFaceKey = cache.faceKeys.get(nbId) || '';
-        if (rejectionMemory.hasRejected(candidateFaceKey, region.stableKey)) {
+        if (rejectionMemory.hasRejected(candidateFaceKey, region.stableKey, region.version)) {
           rejectionReasonCounts.REJECTION_MEMORY++;
           continue;
         }
@@ -155,7 +156,12 @@ export function reconstructGeometryV2(
         );
 
         if (candidate.status === 'REJECTED') {
-          rejectionMemory.rememberRejected(candidateFaceKey, region.stableKey);
+          rejectionMemory.rememberRejected(
+            candidateFaceKey,
+            region.stableKey,
+            region.version,
+            candidate.reason || 'REJECTED'
+          );
           region.stats.rejectedCandidates++;
           if (candidate.reason) {
             rejectionReasonCounts[candidate.reason]++;
@@ -221,7 +227,12 @@ export function reconstructGeometryV2(
       );
 
       if (reEvaluated.status === 'REJECTED') {
-        rejectionMemory.rememberRejected(candidate.faceKey, region.stableKey);
+        rejectionMemory.rememberRejected(
+          candidate.faceKey,
+          region.stableKey,
+          region.version,
+          reEvaluated.reason || 'REJECTED'
+        );
         region.stats.rejectedCandidates++;
         if (reEvaluated.reason) {
           rejectionReasonCounts[reEvaluated.reason]++;
@@ -233,7 +244,7 @@ export function reconstructGeometryV2(
     }
 
     // Check rejection memory
-    if (rejectionMemory.hasRejected(candidate.faceKey, region.stableKey)) {
+    if (rejectionMemory.hasRejected(candidate.faceKey, region.stableKey, region.version)) {
       rejectionReasonCounts.REJECTION_MEMORY++;
       continue;
     }
@@ -270,7 +281,7 @@ export function reconstructGeometryV2(
         region.stats.maxNormalDeviationDeg = validation.maxNormalDeviationDeg;
         region.stats.rmsNormalDeviationDeg = validation.rmsNormalDeviationDeg;
       } else {
-        // Failure: Rollback to last valid snapshot & Freeze region! (Section 16, 39, 40)
+        // Failure: Rollback to last valid snapshot (Section 16, 39, 40, 5.4)
         rejectionReasonCounts.CHECKPOINT_FAILURE++;
         totalRollbacks++;
         region.stats.rollbackCount++;
@@ -285,8 +296,13 @@ export function reconstructGeometryV2(
               const fKey = cache.faceKeys.get(fId) || '';
               region.faceKeys.delete(fKey);
               unassignedFaces.add(fId);
-              // Store in rejection memory so this face doesn't attempt this region again
-              rejectionMemory.rememberRejected(fKey, region.stableKey);
+              // Store in rejection memory for this snapshot version
+              rejectionMemory.rememberRejected(
+                fKey,
+                region.stableKey,
+                region.version,
+                'CHECKPOINT_FAILURE'
+              );
             }
           }
 
@@ -298,8 +314,11 @@ export function reconstructGeometryV2(
           region.stats.faceCount = region.faceIds.size;
         }
 
-        region.state = 'FROZEN';
-        totalFrozen++;
+        // Resilient rollback: Do NOT freeze immediately unless rollback happened repeatedly
+        if (region.stats.rollbackCount >= 4) {
+          region.state = 'FROZEN';
+          totalFrozen++;
+        }
         continue;
       }
     }
@@ -308,13 +327,26 @@ export function reconstructGeometryV2(
     pushNeighborsToQueue(region, [candidate.faceId]);
   }
 
-  // 4. Finalize Regions (Section 20, 21, 51)
+  // 4. Surface Merge Stage (Section 4, 9, 26, 27, 28)
+  // Merge any adjacent coplanar regions into maximum valid design faces
+  let activeReconstructedRegions = regions;
+  let mergeDiagnostics: SurfaceMergeDiagnostic[] = [];
+  let mergesPerformed = 0;
+
+  if (params.enableSurfaceMerge !== false) {
+    const mergeResult = performSurfaceMerge(regions, mesh, cache, params);
+    activeReconstructedRegions = mergeResult.mergedRegions;
+    mergeDiagnostics = mergeResult.diagnostics;
+    mergesPerformed = mergeResult.mergesPerformed;
+  }
+
+  // 5. Finalize Regions (Section 20, 21, 51)
   const faceRegionMap = new Map<number, number>();
   let totalReconstructedArea = 0;
   let maxRegionDeviation = 0;
   let singletons = 0;
 
-  for (const reg of regions) {
+  for (const reg of activeReconstructedRegions) {
     if (reg.faceIds.size === 1) singletons++;
 
     // Compute final PCA plane for verified region
@@ -356,8 +388,8 @@ export function reconstructGeometryV2(
     }
   }
 
-  // 5. Build Inter-Region Adjacency (Section 27, 58 - 60)
-  const adjacencies = buildRegionAdjacency(regions, cache);
+  // 6. Build Inter-Region Adjacency (Section 27, 58 - 60)
+  const adjacencies = buildRegionAdjacency(activeReconstructedRegions, cache);
 
   // 6. Diagnostics & Telemetry (Section 64, 65, 66)
   const endTime = performance.now();
@@ -369,7 +401,7 @@ export function reconstructGeometryV2(
   }
 
   // Face count histogram
-  const faceCounts = regions.map((r) => r.faceIds.size);
+  const faceCounts = activeReconstructedRegions.map((r) => r.faceIds.size);
   const maxFacesInRegion = Math.max(...faceCounts, 1);
   const histogramBins = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024];
   const regionFaceHistogram = histogramBins.map(
@@ -381,7 +413,7 @@ export function reconstructGeometryV2(
   );
 
   // Largest regions summary
-  const sortedByArea = [...regions].sort((a, b) => b.area - a.area);
+  const sortedByArea = [...activeReconstructedRegions].sort((a, b) => b.area - a.area);
   const largestRegions: RegionSummary[] = sortedByArea.slice(0, 10).map((r) => ({
     regionId: r.id,
     stableKey: r.stableKey,
@@ -393,7 +425,7 @@ export function reconstructGeometryV2(
   }));
 
   // Deterministic signature hash (Section 66)
-  const hashSource = regions
+  const hashSource = activeReconstructedRegions
     .map((r) => `${r.stableKey}_f${r.faceIds.size}_a${Math.round(r.area * 1000)}`)
     .sort()
     .join(';');
@@ -406,7 +438,7 @@ export function reconstructGeometryV2(
   const diagnostics: GeometryDiagnostics = {
     inputFaceCount: mesh.faces.length,
     inputVertexCount: mesh.vertices.length,
-    outputRegionCount: regions.length,
+    outputRegionCount: activeReconstructedRegions.length,
     singletonRegionCount: singletons,
     regionFaceHistogram,
     largestRegions,
@@ -424,10 +456,10 @@ export function reconstructGeometryV2(
 
   return {
     version: 'GeometryV2',
-    regions,
+    regions: activeReconstructedRegions,
     adjacency: adjacencies,
     adjacencyGraph: {
-      nodes: regions.map((r) => r.id),
+      nodes: activeReconstructedRegions.map((r) => r.id),
       adjacencies,
     },
     faceRegionMap,

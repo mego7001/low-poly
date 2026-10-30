@@ -12,6 +12,7 @@ import {
   TabSettings,
   UnfoldComponent,
 } from './types';
+import { findEdgeByMeshEdgeId } from './unfold';
 
 export const DEFAULT_TAB_SETTINGS: TabSettings = {
   tabHeight: 8.0, // mm
@@ -53,12 +54,16 @@ export function generateAssemblyTabs(
   const panelMap = new Map<number, SmartPanel>();
   panels.forEach((p) => panelMap.set(p.regionId, p));
 
-  // Map each panelId to its placed 2D vertices in its unfold component
-  const placedPanelMap = new Map<string, { vertices2D: Vec2[]; componentId: number }>();
+  // Map each panelId to its placed 2D vertices and edge IDs in its unfold component
+  const placedPanelMap = new Map<
+    string,
+    { vertices2D: Vec2[]; edgeIds2D?: number[]; componentId: number }
+  >();
   for (const comp of components) {
     for (const p2d of comp.panels2D) {
       placedPanelMap.set(p2d.panelId, {
         vertices2D: p2d.vertices2D,
+        edgeIds2D: p2d.edgeIds2D,
         componentId: comp.componentId,
       });
     }
@@ -77,37 +82,23 @@ export function generateAssemblyTabs(
 
     // If either panel is not placed, use local 2D vertices as fallback
     const vertsA = placedA ? placedA.vertices2D : pA.outerVertices2D;
+    const edgeIdsA = placedA?.edgeIds2D ?? pA.outerEdgeIds2D;
+
     const vertsB = placedB ? placedB.vertices2D : pB.outerVertices2D;
+    const edgeIdsB = placedB?.edgeIds2D ?? pB.outerEdgeIds2D;
 
-    // Find the boundary edge on panel A that best matches seam length
-    let bestEdgeA: [Vec2, Vec2] | null = null;
-    let bestLenDiffA = Infinity;
-    for (let i = 0; i < vertsA.length; i++) {
-      const v1 = vertsA[i];
-      const v2 = vertsA[(i + 1) % vertsA.length];
-      const len = segLen(v1, v2);
-      const diff = Math.abs(len - seam.length);
-      if (diff < bestLenDiffA) {
-        bestLenDiffA = diff;
-        bestEdgeA = [v1, v2];
-      }
-    }
+    const targetEdgeIds =
+      seam.sharedEdgeIds && seam.sharedEdgeIds.length > 0
+        ? seam.sharedEdgeIds
+        : [seam.edgeId];
 
-    // Find the boundary edge on panel B that best matches seam length
-    let bestEdgeB: [Vec2, Vec2] | null = null;
-    let bestLenDiffB = Infinity;
-    for (let i = 0; i < vertsB.length; i++) {
-      const v1 = vertsB[i];
-      const v2 = vertsB[(i + 1) % vertsB.length];
-      const len = segLen(v1, v2);
-      const diff = Math.abs(len - seam.length);
-      if (diff < bestLenDiffB) {
-        bestLenDiffB = diff;
-        bestEdgeB = [v1, v2];
-      }
-    }
+    // Find the boundary edge on panel A using exact mesh edge IDs
+    const matchedA = findEdgeByMeshEdgeId(vertsA, edgeIdsA, targetEdgeIds, seam.length);
+    const bestEdgeA: [Vec2, Vec2] = [matchedA.p1, matchedA.p2];
 
-    if (!bestEdgeA || !bestEdgeB) continue;
+    // Find the boundary edge on panel B using exact mesh edge IDs
+    const matchedB = findEdgeByMeshEdgeId(vertsB, edgeIdsB, targetEdgeIds, seam.length);
+    const bestEdgeB: [Vec2, Vec2] = [matchedB.p1, matchedB.p2];
 
     // Alternate hosting side or choose smaller panel
     const hostA = pairCounter % 2 === 1;

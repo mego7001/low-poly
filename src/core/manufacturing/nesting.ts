@@ -15,6 +15,7 @@ import {
   RemnantRect,
   UnfoldResult,
 } from './types';
+import { transformHingeCutPattern } from './hingeCut';
 
 /**
  * Rotates a 2D point around origin by angle in radians
@@ -201,6 +202,134 @@ export function checkPolygonCollision(
 }
 
 /**
+ * Computes exact outer boundary contour for a connected multi-panel unfold component.
+ * Filters out internal shared bend lines and chains boundary segments into a closed loop.
+ */
+export function buildComponentOuterContour(
+  panels2D: { vertices2D: Vec2[] }[],
+  bendLines2D: { start: Vec2; end: Vec2 }[]
+): Vec2[] {
+  if (panels2D.length === 0) return [];
+  if (panels2D.length === 1) return panels2D[0].vertices2D;
+
+  const eps = 0.8; // mm tolerance
+
+  interface DirectedEdge {
+    p1: Vec2;
+    p2: Vec2;
+    isInternal: boolean;
+  }
+
+  const allEdges: DirectedEdge[] = [];
+  for (const p of panels2D) {
+    const verts = p.vertices2D;
+    const n = verts.length;
+    for (let i = 0; i < n; i++) {
+      const p1 = verts[i];
+      const p2 = verts[(i + 1) % n];
+      const len = dist2D(p1, p2);
+      if (len > 0.1) {
+        allEdges.push({ p1, p2, isInternal: false });
+      }
+    }
+  }
+
+  // Identify internal edges:
+  // 1. Matches a bend line
+  for (const e of allEdges) {
+    for (const bl of bendLines2D) {
+      const d1 = dist2D(e.p1, bl.start) + dist2D(e.p2, bl.end);
+      const d2 = dist2D(e.p1, bl.end) + dist2D(e.p2, bl.start);
+      if (d1 < eps * 2 || d2 < eps * 2) {
+        e.isInternal = true;
+        break;
+      }
+    }
+  }
+
+  // 2. Shares opposite edge with another panel in this component
+  for (let i = 0; i < allEdges.length; i++) {
+    if (allEdges[i].isInternal) continue;
+    for (let j = i + 1; j < allEdges.length; j++) {
+      if (allEdges[j].isInternal) continue;
+      const e1 = allEdges[i];
+      const e2 = allEdges[j];
+      const dOpp = dist2D(e1.p1, e2.p2) + dist2D(e1.p2, e2.p1);
+      const dSame = dist2D(e1.p1, e2.p1) + dist2D(e1.p2, e2.p2);
+      if (dOpp < eps * 2 || dSame < eps * 2) {
+        e1.isInternal = true;
+        e2.isInternal = true;
+        break;
+      }
+    }
+  }
+
+  const boundaryEdges = allEdges.filter((e) => !e.isInternal);
+  if (boundaryEdges.length < 3) {
+    // Fallback: return bounding points
+    const allPts: Vec2[] = [];
+    panels2D.forEach((p) => p.vertices2D.forEach((pt) => allPts.push(pt)));
+    return allPts;
+  }
+
+  // Chain boundary edges head-to-tail
+  const loop: Vec2[] = [];
+  const remaining = [...boundaryEdges];
+  let curEdge = remaining.shift()!;
+  loop.push(curEdge.p1);
+  let curPt = curEdge.p2;
+
+  const maxIter = boundaryEdges.length * 2;
+  let iter = 0;
+
+  while (remaining.length > 0 && iter++ < maxIter) {
+    loop.push(curPt);
+
+    let bestIdx = -1;
+    let bestDist = Infinity;
+    let flip = false;
+
+    for (let i = 0; i < remaining.length; i++) {
+      const d1 = dist2D(curPt, remaining[i].p1);
+      if (d1 < bestDist) {
+        bestDist = d1;
+        bestIdx = i;
+        flip = false;
+      }
+      const d2 = dist2D(curPt, remaining[i].p2);
+      if (d2 < bestDist) {
+        bestDist = d2;
+        bestIdx = i;
+        flip = true;
+      }
+    }
+
+    if (bestIdx !== -1 && bestDist < 5.0) {
+      const nextEdge = remaining.splice(bestIdx, 1)[0];
+      curPt = flip ? nextEdge.p1 : nextEdge.p2;
+    } else {
+      break;
+    }
+  }
+
+  // Remove duplicate consecutive points
+  const cleaned: Vec2[] = [];
+  for (let i = 0; i < loop.length; i++) {
+    const pt = loop[i];
+    const prev = cleaned[cleaned.length - 1];
+    if (!prev || dist2D(pt, prev) > 0.3) {
+      cleaned.push(pt);
+    }
+  }
+
+  if (cleaned.length > 2 && dist2D(cleaned[0], cleaned[cleaned.length - 1]) < 0.5) {
+    cleaned.pop();
+  }
+
+  return cleaned.length >= 3 ? cleaned : panels2D[0].vertices2D;
+}
+
+/**
  * Raw part structure prepared for multi-sheet packing
  */
 interface RawPart {
@@ -210,6 +339,8 @@ interface RawPart {
   rawPolygon: Vec2[];
   bendLines: PlacedPart['bendLines'];
   tabs: AssemblyTab[];
+  subPanels?: PlacedPart['subPanels'];
+  isDetachedPatch?: boolean;
   area: number;
 }
 
@@ -235,14 +366,18 @@ export function performPolygonNesting(
 
   // 1. Prepare raw parts from unfold components (Section 39)
   const partsToPlace: RawPart[] = [];
+  const isComponentMode = settings.nestingStrategy === 'components';
 
-  for (const comp of unfoldResult.components) {
-    for (const p2d of comp.panels2D) {
-      // Find all tabs hosted on this panel
-      const attachedTabs = comp.tabs.filter((t) => t.sourcePanelId === p2d.panelId);
+  if (isComponentMode) {
+    // === COMPONENT MODE: Nest the whole unfolded components (multi-panel petals with living hinges) ===
+    for (const comp of unfoldResult.components) {
+      const attachedTabs = comp.tabs || [];
+      const outerContour =
+        comp.panels2D.length === 1
+          ? comp.panels2D[0].vertices2D
+          : buildComponentOuterContour(comp.panels2D, comp.bendLines2D);
 
-      // Compute bounding box to normalize vertices to local origin (0, 0)
-      const allPoints: Vec2[] = [...p2d.vertices2D];
+      const allPoints: Vec2[] = [...outerContour];
       for (const t of attachedTabs) {
         for (const pt of t.tabPolygon2D) {
           allPoints.push(pt);
@@ -250,29 +385,24 @@ export function performPolygonNesting(
       }
 
       const bounds = getPolygonBounds(allPoints);
-      const normalizedPoly: Vec2[] = p2d.vertices2D.map(([x, y]) => [
+      const normalizedPoly: Vec2[] = outerContour.map(([x, y]) => [
         x - bounds.minX,
         y - bounds.minY,
       ]);
 
-      // Calculate 2D polygon area using Shoelace formula
-      let area = 0;
-      for (let i = 0; i < normalizedPoly.length; i++) {
-        const j = (i + 1) % normalizedPoly.length;
-        area += normalizedPoly[i][0] * normalizedPoly[j][1];
-        area -= normalizedPoly[j][0] * normalizedPoly[i][1];
-      }
-      const panelNetArea = Math.abs(area) * 0.5;
+      const normalizedBendLines = comp.bendLines2D.map((bl) => {
+        const normPt = (p: Vec2): Vec2 => [p[0] - bounds.minX, p[1] - bounds.minY];
+        return {
+          start: normPt(bl.start),
+          end: normPt(bl.end),
+          angleDeg: bl.angleDeg,
+          bendType: bl.bendType,
+          hingeCutPattern: bl.hingeCutPattern
+            ? transformHingeCutPattern(bl.hingeCutPattern, normPt)
+            : undefined,
+        };
+      });
 
-      // Normalize bend lines to local origin
-      const normalizedBendLines = comp.bendLines2D.map((bl) => ({
-        start: [bl.start[0] - bounds.minX, bl.start[1] - bounds.minY] as Vec2,
-        end: [bl.end[0] - bounds.minX, bl.end[1] - bounds.minY] as Vec2,
-        angleDeg: bl.angleDeg,
-        bendType: bl.bendType,
-      }));
-
-      // Normalize attached tabs to local origin
       const normalizedTabs: AssemblyTab[] = attachedTabs.map((tab) => ({
         ...tab,
         baseEdge2D: [
@@ -294,15 +424,136 @@ export function performPolygonNesting(
         ],
       }));
 
+      const normalizedSubPanels = comp.panels2D.map((sp) => ({
+        panelId: sp.panelId,
+        vertices2D: sp.vertices2D.map(([x, y]) => [x - bounds.minX, y - bounds.minY] as Vec2),
+        center2D: [sp.center2D[0] - bounds.minX, sp.center2D[1] - bounds.minY] as Vec2,
+      }));
+
+      let totalCompArea = 0;
+      for (const sp of comp.panels2D) {
+        let area = 0;
+        const v = sp.vertices2D;
+        for (let i = 0; i < v.length; i++) {
+          const j = (i + 1) % v.length;
+          area += v[i][0] * v[j][1] - v[j][0] * v[i][1];
+        }
+        totalCompArea += Math.abs(area) * 0.5;
+      }
+
       partsToPlace.push({
-        partId: `PART-${p2d.panelId}`,
-        panelId: p2d.panelId,
+        partId: comp.isDetachedPatch
+          ? `PATCH-${comp.componentId}`
+          : `COMP-${comp.componentId}`,
+        panelId: comp.isDetachedPatch
+          ? `رقعة منفصلة #${comp.componentId} (${comp.panels2D.length} لوح)`
+          : `قطاع رئيسي #${comp.componentId} (${comp.panels2D.length} لوح)`,
         componentId: comp.componentId,
         rawPolygon: normalizedPoly,
         bendLines: normalizedBendLines,
         tabs: normalizedTabs,
-        area: panelNetArea,
+        subPanels: normalizedSubPanels,
+        isDetachedPatch: comp.isDetachedPatch,
+        area: totalCompArea,
       });
+    }
+  } else {
+    // === INDIVIDUAL MODE: Nest each single panel separately ===
+    for (const comp of unfoldResult.components) {
+      const assignedBendEdgeIds = new Set<number>();
+
+      for (const p2d of comp.panels2D) {
+        // Find all tabs hosted on this panel
+        const attachedTabs = comp.tabs.filter((t) => t.sourcePanelId === p2d.panelId);
+
+        // Compute bounding box to normalize vertices to local origin (0, 0)
+        const allPoints: Vec2[] = [...p2d.vertices2D];
+        for (const t of attachedTabs) {
+          for (const pt of t.tabPolygon2D) {
+            allPoints.push(pt);
+          }
+        }
+
+        const bounds = getPolygonBounds(allPoints);
+        const normalizedPoly: Vec2[] = p2d.vertices2D.map(([x, y]) => [
+          x - bounds.minX,
+          y - bounds.minY,
+        ]);
+
+        // Calculate 2D polygon area using Shoelace formula
+        let area = 0;
+        for (let i = 0; i < normalizedPoly.length; i++) {
+          const j = (i + 1) % normalizedPoly.length;
+          area += normalizedPoly[i][0] * normalizedPoly[j][1];
+          area -= normalizedPoly[j][0] * normalizedPoly[i][1];
+        }
+        const panelNetArea = Math.abs(area) * 0.5;
+
+        // Select bend lines that belong to this panel and prevent duplicate cuts across parts
+        const panelBends = comp.bendLines2D.filter((bl) => {
+          if (assignedBendEdgeIds.has(bl.edgeId)) return false;
+          if (p2d.edgeIds2D && p2d.edgeIds2D.includes(bl.edgeId)) return true;
+          // Segment boundary distance fallback
+          const poly = p2d.vertices2D;
+          let dStart = Infinity;
+          let dEnd = Infinity;
+          for (let i = 0; i < poly.length; i++) {
+            const next = poly[(i + 1) % poly.length];
+            dStart = Math.min(dStart, distPointToSegment(bl.start, poly[i], next));
+            dEnd = Math.min(dEnd, distPointToSegment(bl.end, poly[i], next));
+          }
+          return dStart < 1.0 && dEnd < 1.0;
+        });
+
+        // Mark assigned
+        panelBends.forEach((bl) => assignedBendEdgeIds.add(bl.edgeId));
+
+        // Normalize bend lines to local origin
+        const normalizedBendLines = panelBends.map((bl) => {
+          const normPt = (p: Vec2): Vec2 => [p[0] - bounds.minX, p[1] - bounds.minY];
+          return {
+            start: normPt(bl.start),
+            end: normPt(bl.end),
+            angleDeg: bl.angleDeg,
+            bendType: bl.bendType,
+            hingeCutPattern: bl.hingeCutPattern
+              ? transformHingeCutPattern(bl.hingeCutPattern, normPt)
+              : undefined,
+          };
+        });
+
+        // Normalize attached tabs to local origin
+        const normalizedTabs: AssemblyTab[] = attachedTabs.map((tab) => ({
+          ...tab,
+          baseEdge2D: [
+            [tab.baseEdge2D[0][0] - bounds.minX, tab.baseEdge2D[0][1] - bounds.minY],
+            [tab.baseEdge2D[1][0] - bounds.minX, tab.baseEdge2D[1][1] - bounds.minY],
+          ],
+          tabPolygon2D: tab.tabPolygon2D.map(([x, y]) => [x - bounds.minX, y - bounds.minY]),
+          foldLine2D: [
+            [tab.foldLine2D[0][0] - bounds.minX, tab.foldLine2D[0][1] - bounds.minY],
+            [tab.foldLine2D[1][0] - bounds.minX, tab.foldLine2D[1][1] - bounds.minY],
+          ],
+          labelPosition2D: [
+            tab.labelPosition2D[0] - bounds.minX,
+            tab.labelPosition2D[1] - bounds.minY,
+          ],
+          matchingLabelPosition2D: [
+            tab.matchingLabelPosition2D[0] - bounds.minX,
+            tab.matchingLabelPosition2D[1] - bounds.minY,
+          ],
+        }));
+
+        partsToPlace.push({
+          partId: `PART-${p2d.panelId}`,
+          panelId: p2d.panelId,
+          componentId: comp.componentId,
+          rawPolygon: normalizedPoly,
+          bendLines: normalizedBendLines,
+          tabs: normalizedTabs,
+          area: panelNetArea,
+        });
+      }
     }
   }
 
@@ -470,16 +721,20 @@ export function performPolygonNesting(
         const { rotDeg, rotRad, x: placeX, y: placeY, polygon: placedPoly, rotBounds } = bestPlacement;
 
         // Transform bend lines to placed orientation and position
-        const placedBendLines = part.bendLines.map((bl) => {
-          const rStart = rotatePoint2D(bl.start, rotRad);
-          const rEnd = rotatePoint2D(bl.end, rotRad);
-          return {
-            start: [rStart[0] - rotBounds.minX + placeX, rStart[1] - rotBounds.minY + placeY] as Vec2,
-            end: [rEnd[0] - rotBounds.minX + placeX, rEnd[1] - rotBounds.minY + placeY] as Vec2,
-            angleDeg: bl.angleDeg,
-            bendType: bl.bendType,
-          };
-        });
+        const transformPt = (pt: Vec2): Vec2 => {
+          const r = rotatePoint2D(pt, rotRad);
+          return [r[0] - rotBounds.minX + placeX, r[1] - rotBounds.minY + placeY];
+        };
+
+        const placedBendLines = part.bendLines.map((bl) => ({
+          start: transformPt(bl.start),
+          end: transformPt(bl.end),
+          angleDeg: bl.angleDeg,
+          bendType: bl.bendType,
+          hingeCutPattern: bl.hingeCutPattern
+            ? transformHingeCutPattern(bl.hingeCutPattern, transformPt)
+            : undefined,
+        }));
 
         // Transform attached tabs to placed orientation and position
         const placedTabs = part.tabs.map((t) => {
@@ -523,6 +778,12 @@ export function performPolygonNesting(
           polygon: placedPoly,
           bendLines: placedBendLines,
           tabs: placedTabs,
+          subPanels: part.subPanels?.map((sp) => ({
+            panelId: sp.panelId,
+            vertices2D: sp.vertices2D.map((pt) => transformPt(pt)),
+            center2D: transformPt(sp.center2D),
+          })),
+          isDetachedPatch: part.isDetachedPatch,
           bounds: {
             width: rotBounds.width,
             height: rotBounds.height,
@@ -538,61 +799,110 @@ export function performPolygonNesting(
       }
     }
 
-    // 4. Dynamic Multi-Sheet Spanning: If part does not fit on any sheet, allocate a new sheet!
+    // 4. Dynamic Multi-Sheet Spanning: If part does not fit on any sheet, allocate a new sheet (Section 15)
     if (!placed) {
       const newSheet = createSheet(sheets.length + 1);
-      sheets.push(newSheet);
 
-      // Place part on the fresh sheet at (edgeMargin, edgeMargin)
-      const rotDeg = 0;
-      const rotBounds = getPolygonBounds(part.rawPolygon);
-      const placedPoly: Vec2[] = part.rawPolygon.map(([x, y]) => [
-        x + edgeMargin,
-        y + edgeMargin,
-      ]);
+      // Search valid placement on the fresh sheet with proper rotation and bounds verification
+      for (const rotDeg of rotations) {
+        if (placed) break;
+        const rotRad = (rotDeg * Math.PI) / 180;
+        const rotPoly =
+          rotDeg === 0
+            ? part.rawPolygon
+            : part.rawPolygon.map((p) => rotatePoint2D(p, rotRad));
+        const rotBounds = getPolygonBounds(rotPoly);
 
-      newSheet.placedParts.push({
-        partId: part.partId,
-        panelId: part.panelId,
-        componentId: part.componentId,
-        x: edgeMargin,
-        y: edgeMargin,
-        rotationDeg: rotDeg,
-        polygon: placedPoly,
-        bendLines: part.bendLines.map((bl) => ({
-          ...bl,
-          start: [bl.start[0] + edgeMargin, bl.start[1] + edgeMargin] as Vec2,
-          end: [bl.end[0] + edgeMargin, bl.end[1] + edgeMargin] as Vec2,
-        })),
-        tabs: part.tabs.map((t) => ({
-          ...t,
-          baseEdge2D: [
-            [t.baseEdge2D[0][0] + edgeMargin, t.baseEdge2D[0][1] + edgeMargin],
-            [t.baseEdge2D[1][0] + edgeMargin, t.baseEdge2D[1][1] + edgeMargin],
-          ],
-          tabPolygon2D: t.tabPolygon2D.map(([tx, ty]) => [tx + edgeMargin, ty + edgeMargin]),
-          foldLine2D: [
-            [t.foldLine2D[0][0] + edgeMargin, t.foldLine2D[0][1] + edgeMargin],
-            [t.foldLine2D[1][0] + edgeMargin, t.foldLine2D[1][1] + edgeMargin],
-          ],
-          labelPosition2D: [t.labelPosition2D[0] + edgeMargin, t.labelPosition2D[1] + edgeMargin],
-          matchingLabelPosition2D: [
-            t.matchingLabelPosition2D[0] + edgeMargin,
-            t.matchingLabelPosition2D[1] + edgeMargin,
-          ],
-        })),
-        bounds: {
-          width: rotBounds.width,
-          height: rotBounds.height,
-          minX: edgeMargin,
-          minY: edgeMargin,
-          maxX: edgeMargin + rotBounds.width,
-          maxY: edgeMargin + rotBounds.height,
-        },
-      });
+        // Check if rotated part exceeds sheet printable dimensions
+        const maxAllowedX = sheetWidth - edgeMargin - rotBounds.width;
+        const maxAllowedY = sheetHeight - edgeMargin - rotBounds.height;
+        if (maxAllowedX < edgeMargin || maxAllowedY < edgeMargin) {
+          continue;
+        }
 
-      newSheet.usedArea += part.area;
-      placed = true;
+        const candX = edgeMargin;
+        const candY = edgeMargin;
+        const placedPoly: Vec2[] = rotPoly.map(([x, y]) => [
+          x - rotBounds.minX + candX,
+          y - rotBounds.minY + candY,
+        ]);
+
+        const transformPt = (pt: Vec2): Vec2 => {
+          const r = rotatePoint2D(pt, rotRad);
+          return [r[0] - rotBounds.minX + candX, r[1] - rotBounds.minY + candY];
+        };
+
+        // Legally fits on the new sheet!
+        sheets.push(newSheet);
+        newSheet.placedParts.push({
+          partId: part.partId,
+          panelId: part.panelId,
+          componentId: part.componentId,
+          x: candX,
+          y: candY,
+          rotationDeg: rotDeg,
+          polygon: placedPoly,
+          bendLines: part.bendLines.map((bl) => ({
+            start: transformPt(bl.start),
+            end: transformPt(bl.end),
+            angleDeg: bl.angleDeg,
+            bendType: bl.bendType,
+            hingeCutPattern: bl.hingeCutPattern
+              ? transformHingeCutPattern(bl.hingeCutPattern, transformPt)
+              : undefined,
+          })),
+          tabs: part.tabs.map((t) => {
+            const rB0 = rotatePoint2D(t.baseEdge2D[0], rotRad);
+            const rB1 = rotatePoint2D(t.baseEdge2D[1], rotRad);
+            const rLabel = rotatePoint2D(t.labelPosition2D, rotRad);
+            const rMLabel = rotatePoint2D(t.matchingLabelPosition2D, rotRad);
+            return {
+              ...t,
+              baseEdge2D: [
+                [rB0[0] - rotBounds.minX + candX, rB0[1] - rotBounds.minY + candY],
+                [rB1[0] - rotBounds.minX + candX, rB1[1] - rotBounds.minY + candY],
+              ] as [Vec2, Vec2],
+              tabPolygon2D: t.tabPolygon2D.map(([tx, ty]) => {
+                const rt = rotatePoint2D([tx, ty], rotRad);
+                return [rt[0] - rotBounds.minX + candX, rt[1] - rotBounds.minY + candY] as Vec2;
+              }),
+              foldLine2D: [
+                [rB0[0] - rotBounds.minX + candX, rB0[1] - rotBounds.minY + candY],
+                [rB1[0] - rotBounds.minX + candX, rB1[1] - rotBounds.minY + candY],
+              ] as [Vec2, Vec2],
+              labelPosition2D: [
+                rLabel[0] - rotBounds.minX + candX,
+                rLabel[1] - rotBounds.minY + candY,
+              ] as Vec2,
+              matchingLabelPosition2D: [
+                rMLabel[0] - rotBounds.minX + candX,
+                rMLabel[1] - rotBounds.minY + candY,
+              ] as Vec2,
+            };
+          }),
+          subPanels: part.subPanels?.map((sp) => ({
+            panelId: sp.panelId,
+            vertices2D: sp.vertices2D.map((pt) => transformPt(pt)),
+            center2D: transformPt(sp.center2D),
+          })),
+          isDetachedPatch: part.isDetachedPatch,
+          bounds: {
+            width: rotBounds.width,
+            height: rotBounds.height,
+            minX: candX,
+            minY: candY,
+            maxX: candX + rotBounds.width,
+            maxY: candY + rotBounds.height,
+          },
+        });
+
+        newSheet.usedArea += part.area;
+        placed = true;
+        break;
+      }
+
+      // If part cannot fit on a fresh sheet within sheet boundaries, it remains UNPLACED
+      // and is accurately counted in unplacedPartsCount (Section 15)
     }
   }
 
